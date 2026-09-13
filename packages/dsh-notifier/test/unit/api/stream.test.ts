@@ -124,6 +124,14 @@ function assemble(options: { readonly maxConnections?: number } = {}) {
     },
     pipeline: { submit: () => {} },
     kinds: { listKinds: () => [], confirmKind: async () => ({ ok: true, view: VIEW }) },
+    // 流块不碰能力面，但端口是必填的：这里给一份最小实现，本文件不该因为别人的面长大而改
+    channels: {
+      probeCapabilities: () => Promise.reject(new Error("流块不该碰能力面")),
+      hostPlatform: () => "linux",
+      undeterminedCapabilities: () => {
+        throw new Error("流块不碰能力面");
+      },
+    },
   };
   installApi(deps);
   const publish = (payload: OutgoingFrame): void => {
