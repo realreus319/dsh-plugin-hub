@@ -1,0 +1,45 @@
+{
+  "$schema": "../node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": [
+    "packages/dsh-notifier/src/server/config/**/*.ts",
+    "!packages/dsh-notifier/src/client/**",
+    "!packages/dsh-notifier/src/types.ts",
+    "!packages/dsh-notifier/src/**/interface.ts",
+    "!packages/dsh-notifier/src/**/deps.ts",
+    "!packages/dsh-notifier/src/**/*.d.ts",
+    "!packages/dsh-notifier/src/**/*.ps1"
+  ],
+  "testRunner": "vitest",
+  "mutator": {
+    "excludedMutations": [
+      "StringLiteral",
+      "ArrayLiteral",
+      "ObjectLiteral",
+      "TemplateLiteral"
+    ]
+  },
+  "plugins": [
+    "@stryker-mutator/vitest-runner"
+  ],
+  "concurrency": 16,
+  "timeoutMS": 60000,
+  "dryRunTimeoutMinutes": 5,
+  "reporters": [
+    "progress",
+    "clear-text",
+    "json"
+  ],
+  "coverageAnalysis": "perTest",
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true,
+  "vitest": {
+    "related": false,
+    "configFile": "vitest.stryker.d/dsh-notifier.config.ts"
+  },
+  "jsonReporter": {
+    "fileName": "coverage/mutation/dsh-notifier-config.json"
+  },
+  "incremental": true,
+  "incrementalFile": "coverage/mutation/incremental-notifier-config.json",
+  "_comment": "#733 按域重写：config——配置域（model 默认值与形状；input 解析/归一化/校验与键上限；service 读写、修订号与并发保护；redact 出站掩码）。#733 后期删除：内容脱敏规则表、错误合并窗口、完成聚合窗口、审批二次提醒（askRemindMin）四个设置面。"
+}

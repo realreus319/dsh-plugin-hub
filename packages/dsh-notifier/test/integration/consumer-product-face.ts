@@ -1,106 +1,60 @@
 /**
- * dsh-notifier — L0 消费方类型用例（**产物面**；issue #733 M2-3.2）。
+ * dsh-notifier — 产物面消费方夹具（按包名取 `lib/index.d.ts`）。
  *
- * 为什么单列且必须按包名导入：`lib/index.d.ts` 是外部插件唯一的类型入口，但
- * test/ 内既有用例（含 consumer-types.test.ts 的 28 条类型体锚）全部从
- * `../../src/index.ts` 导入——测的是**源码面**。源码面导入会让 `src/index.ts`
- * 直接进编译程序，于是「只写在源 `.d.ts`、从未进产物」的声明合并也能看起来生效
- * （#733 M2-3.1 修的正是这个缺陷），跨包类型可达性无从判定。本文件只做一件事：
- * 以真实消费方视角**按包名**取产物声明面，把跨包契约钉在编译期。
+ * 为什么单列一个文件（#733 M2-3.2）：源码面导入（`../../src/index.ts`）会让 src 直接进编译程序，
+ * 从而**掩盖**「声明合并只写进源 `.d.ts`、从未进产物」这类缺陷——那种情况下消费方按包名导入时
+ * `ctx["wingsky.notifier"]` 与 `apply` / `inject` / `name` 全部失类型，而源码面用例照样绿。
+ * 本文件经 `test/tsconfig.json` 的 `paths` 把包名映射到 `lib/index.d.ts`，判据是两条：
+ * ① 声明合并对消费方可达；② 服务面与入口面按包名可命名。
  *
- * 解析路径：`@wingsky-1/dsh-notifier` 由 test/tsconfig.json 的 `paths` 指向
- * `../lib/index.d.ts`（产物面）。全部导入均为 `import type`（运行时整体擦除），
- * 故 vitest 不执行本文件、也无运行时依赖；文件名不带 `.test.ts` 是有意的
- * （纯类型夹具不改变 `--min` 测试文件计数）。判据由
- * scripts/test/service-contract-wiring.test.ts 用真实 tsc 编译 test/tsconfig.json
- * 执行，前置条件是 `pnpm build` 已产出 lib/（与 test/client/** 读 lib 产物的既有先例一致）。
+ * 与 `consumer-types.test.ts` 的分工：那个锚**类型体**（源码面），这个锚**可达性**（产物面）。
+ * 不参与 `--min`：文件名不带 `.test.ts`，它是纯类型夹具，没有运行时断言——产物级的运行时判据属于
+ * `pnpm pack:check` 的「声明合并可达性」（scripts/lib/dts-cordis-merge-lib.ts）。
  *
- * 写死期望值的纪律：期望值必须是**独立字面量**。用 `T["m"]` 自引用、或 import
- * 包内未导出类型当期望值，会让两侧同步漂移、锚退化为恒真。
+ * 前置：本文件被编译前必须先构建（`pnpm --filter @wingsky-1/dsh-notifier build`），
+ * `paths` 指向的 `lib/index.d.ts` 才存在；CI / 本地门禁按 script-test-prereqs.mjs 的清单补建。
  */
-import type { Context, Events } from "@deepseek-ai/cordis";
-import type {} from "@deepseek-ai/dsh-agent";
-import type {} from "@deepseek-ai/dsh-session";
-import type {} from "@deepseek-ai/dsh-user-approval";
+import type { Context } from "@deepseek-ai/cordis";
+
 import type { NotifierService } from "@wingsky-1/dsh-notifier";
+import { apply, inject, name } from "@wingsky-1/dsh-notifier";
 
-/** 双向类型相等（编译期判据：任一侧漂移即 false）。 */
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-/** 编译期闸门：泛型实参不是 true 就报错。 */
-type Expect<T extends true> = T;
+/** 入口值面可达：消费方经 cordis patch 挂载时要用到这三个导出。 */
+export const entryFace = { apply, inject, name };
 
-/** 投递终态载荷（src/sdk/interface.ts NotifySentEvent；有意不进包导出面）——
- * 消费方无法命名它，故按结构独立写死期望值。 */
-type NotifySentEventShape = {
-  kind: string;
-  title: string;
-  message: string;
-  channelId: string;
-  status: "ok" | "failed";
-  error?: string;
-  ts: number;
-};
+/** 挂载形态：第二个入参在产物声明里同样可命名、可省略。 */
+export function mount(ctx: Context): void {
+  apply(ctx);
+  apply(ctx, { enabled: false });
+}
 
-// ---------------------------------------------------------------- 合并面：宿主 Events
-// 直接断言事件签名（不经 `ctx.on`）：合并缺失时该属性不存在，是硬报错 TS2339，
-// 判据不会退化成「any 对 any」的恒真比较。
-type _SentEventSignature = Expect<Equal<Events["wingsky-notify/sent"], (payload: NotifySentEventShape) => void>>;
-// 正向枚举断言（不写「不存在某 key」的反向式）：本包注入的 Events key 恰好这一个。
-type _MergedEventKeys = Expect<Equal<Extract<keyof Events, `wingsky-notify/${string}`>, "wingsky-notify/sent">>;
+/** 声明合并可达：这一行的类型来自 `lib/index.d.ts` 的 `declare module "@deepseek-ai/cordis"`。 */
+export function serviceFromContext(ctx: Context): NotifierService {
+  return ctx["wingsky.notifier"];
+}
 
-// ---------------------------------------------------------------- 反向锚：NotifySentEvent 不进包导出面
-// 上一条正向锚证明「载荷类型经合并签名可达」，这一条证明「可达性不靠包导出面」——
-// src/sdk/interface.ts 已写明它有意不导出（#733 M2c R2）。
-// 形态有两轮实测依据：
-//  1. `Equal<Extract<keyof typeof NotifierPkg, "NotifySentEvent">, never>` 是**假绿**——
-//     `keyof typeof <命名空间>` 只枚举**值面**，把 `export type { NotifySentEvent }` 加进
-//     src/index.ts 后该断言实测仍 exit=0；
-//  2. 按名 `import type` 形态能红，但依赖 `noUnusedLocals` 关闭——该选项一旦开启，「未使用
-//     的导入」会占用 @ts-expect-error，锚退化为恒绿（#733 M2c 复核实测）。
-// 故改用**类型位置**探测，且**导出**该别名：导出声明不受 noUnusedLocals 约束，指令只在
-// 「成员存在」时才成为未使用——成员不存在 → TS2694 被抑制；成员一旦被导出 → 无错可抑 →
-// TS2578「未使用指令」→ 编译硬失败。
-// @ts-expect-error NotifySentEvent 有意不进包导出面：包命名空间里不该有这个成员
-export type _ProbeSentEventMustNotResolve = import("@wingsky-1/dsh-notifier").NotifySentEvent;
+/** 服务面按包名可命名，且两个口都能调（消费方要写标注就得能命名它）。 */
+export function callService(service: NotifierService): Promise<void> {
+  service.registerKind({ id: "consumer-demo:report", label: "演示" });
+  return service.send({ kind: "consumer-demo:report", body: "正文" });
+}
 
-// ---------------------------------------------------------------- 合并面：宿主 Context
-type _ServiceFace = Expect<Equal<Context["wingsky.notifier"], NotifierService>>;
-type _MergedContextKeys = Expect<Equal<Extract<keyof Context, "wingsky.notifier">, "wingsky.notifier">>;
+/** apiVersion 是字面量 2：消费方按它分支时，服务面版本漂移即编译错误。 */
+export function apiVersionOf(service: NotifierService): 2 {
+  return service.apiVersion;
+}
 
-/**
- * 真实消费方形态：外部 hub 插件经 cordis patch 挂载后，在 apply(ctx) 内使用通知
- * 中心。本函数**永不调用**（判据全在编译期），只用来把「消费方怎么用」钉死。
- */
-export function consumerApply(ctx: Context): void {
-  // inject 声明形态：cordis 据此解析依赖（服务缺失时插件停用而非裸崩）。
-  const inject: string[] = ["wingsky.notifier"];
-  void inject;
+/** 授权边界（`@ts-expect-error` 指令本身受检：错误消失即报 unused）。 */
+export function rejectedByType(service: NotifierService): void {
+  // @ts-expect-error 确认只能由设置页经域契约发起
+  service.confirmKind("consumer-demo:report", true);
+  // @ts-expect-error 清单同理
+  service.listKinds();
+}
 
-  // ① 服务面：ctx['wingsky.notifier'] 直接可用，类型即包导出面的 NotifierService。
-  const svc = ctx["wingsky.notifier"];
-  type _DirectFace = Expect<Equal<typeof svc, NotifierService>>;
-
-  // ② 可选增强形态：探测式读取必须带 undefined（消费方据此降级）。
-  const maybe = ctx.get("wingsky.notifier", false);
-  type _MaybeFace = Expect<Equal<typeof maybe, NotifierService | undefined>>;
-
-  // ③ provide 形态：提供方经同一合并面注册（值受 Context 约束，不接受任意值）。
-  ctx.provide("wingsky.notifier", svc);
-
-  // ④ 调用面：按包导出面的签名调用必须通过。
-  void svc.send({ source: "@wingsky-1/example", kind: "example:ping", severity: "info", body: "hello" });
-  void svc.listKinds();
-  svc.registerKind({ id: "example:ping", label: "示例" });
-  svc.confirmKind("example:ping", true);
-
-  // ⑤ 事件面：订阅投递终态；payload 类型来自合并后的 Events 声明。
-  //    实测（cordis 4.0.2 events.d.ts:88）：`Context.on` 只有
-  //    `on<K extends keyof Events>(name, listener: Events[K], options?)` **一个**重载——
-  //    宽松的 `on(name: string | symbol, listener: (...args: any) => any)`（同文件 :197）
-  //    属于 `EventsService` 类、不在 `Context` 上。故合并缺失时此处是硬报错
-  //    （实测 TS2345 事件名 + TS7006 隐式 any），不存在「退化成 any 而假绿」的路径。
-  ctx.on("wingsky-notify/sent", (payload) => {
-    type _PayloadFace = Expect<Equal<typeof payload, NotifySentEventShape>>;
-    void payload.channelId;
-  });
+/** 未声明的服务键不可达（反向：`Context` 没有字符串索引签名，合并若整体失效上面那行也会红）。 */
+export function rejectedUnknownKey(ctx: Context): void {
+  // @ts-expect-error 服务名没有物理定义在这里，只有声明合并能提供它
+  const missing = ctx["wingsky.notifier-typo"];
+  void missing;
 }

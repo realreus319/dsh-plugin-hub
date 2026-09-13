@@ -12,7 +12,14 @@
  * 的路由事实源不可被插件页假设，内存态零冲突面）。
  */
 import * as React from "react";
-import { STATS_URL, ADAPTERS_URL, SELECT_URL, INSPECT_URL, ADD_URL, fetchTimeout } from "../core.ts";
+import {
+  STATS_URL,
+  ADAPTERS_URL,
+  SELECT_URL,
+  INSPECT_URL,
+  ADD_URL,
+  fetchTimeout,
+} from "../core.ts";
 import { splitProviderList } from "../../shared/client-logic.ts";
 import type { ProviderListItem } from "../../shared/client-logic.ts";
 import { t } from "../../../../../shared/client/i18n.js";
@@ -41,9 +48,14 @@ const TABS: Array<{ key: SettingsTabKey; labelKey: string }> = [
 /** 设置页根组件：模型配置提供商列表驱动手风琴；用量可视化对启用中的 provider 拉 /stats。 */
 export function SettingsPage(): React.ReactElement {
   const [tab, setTab] = React.useState<SettingsTabKey>("trend");
-  const [statsByProvider, setStatsByProvider] = React.useState<Record<string, StatsView | null>>({});
+  const [statsByProvider, setStatsByProvider] = React.useState<Record<string, StatsView | null>>(
+    {},
+  );
   const [meta, setMeta] = React.useState<AdaptersMeta | null>(null);
-  const [list, setList] = React.useState<{ main: ProviderListItem[]; extra: ProviderListItem[] }>({ main: [], extra: [] });
+  const [list, setList] = React.useState<{ main: ProviderListItem[]; extra: ProviderListItem[] }>({
+    main: [],
+    extra: [],
+  });
   const [busy, setBusy] = React.useState(false);
 
   const reload = React.useCallback(async (): Promise<void> => {
@@ -55,7 +67,11 @@ export function SettingsPage(): React.ReactElement {
         const grouped: Record<string, Array<{ name: string; label: string; source: string }>> = {};
         for (const info of m.host ?? []) {
           for (const provider of info.providers) {
-            (grouped[provider] ??= []).push({ name: info.name, label: info.label, source: info.source });
+            (grouped[provider] ??= []).push({
+              name: info.name,
+              label: info.label,
+              source: info.source,
+            });
           }
         }
         setList(
@@ -89,7 +105,9 @@ export function SettingsPage(): React.ReactElement {
   /** 统一包装：请求期间置 busy，完成后刷新面板数据。 */
   function mutate(action: () => Promise<unknown>): void {
     setBusy(true);
-    action()
+    // 显式标注不等待：本包装是 fire-and-forget 语义（失败已被链内 catch 吞掉，只做复位），
+    // 调用方拿不到也不该拿到这条链。
+    void action()
       .catch(() => {})
       .then(() => reload())
       .finally(() => setBusy(false));
@@ -130,7 +148,12 @@ export function SettingsPage(): React.ReactElement {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file }),
       });
-      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; adapter?: InspectAdapter; error?: string; detail?: string };
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        adapter?: InspectAdapter;
+        error?: string;
+        detail?: string;
+      };
       if (!res.ok) {
         return { ok: false, detail: body.detail ?? body.error ?? `HTTP ${res.status}` };
       }
@@ -149,7 +172,11 @@ export function SettingsPage(): React.ReactElement {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ file: form.file }),
         });
-        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; detail?: string };
+        const body = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          detail?: string;
+        };
         if (!res.ok) {
           return { ok: false, detail: body.detail ?? body.error ?? `HTTP ${res.status}` };
         }
@@ -163,8 +190,11 @@ export function SettingsPage(): React.ReactElement {
   );
 
   // 五窗格（keep-mounted：hidden 属性切换显隐，组件实例不销毁——表单编辑态保留）
-  const pane = (key: SettingsTabKey, node: React.ReactElement): React.ReactElement =>
-    <div className="dou-set-pane" key={key} hidden={tab !== key}>{node}</div>;
+  const pane = (key: SettingsTabKey, node: React.ReactElement): React.ReactElement => (
+    <div className="dou-set-pane" key={key} hidden={tab !== key}>
+      {node}
+    </div>
+  );
 
   return (
     <div className="dou-set-card" style={{ maxWidth: 560 }}>
@@ -189,16 +219,19 @@ export function SettingsPage(): React.ReactElement {
         {pane("trend", <TrendSection />)}
         {pane("report", <ReportSection />)}
         {pane("usage", <UsageSection statsByProvider={statsByProvider} />)}
-        {pane("providers", <ProviderListSection
-          meta={meta}
-          main={list.main}
-          extra={list.extra}
-          busy={busy}
-          onSwitch={onSwitch}
-          onDisable={onDisable}
-          onInspect={onInspect}
-          onAdd={onAdd}
-        />)}
+        {pane(
+          "providers",
+          <ProviderListSection
+            meta={meta}
+            main={list.main}
+            extra={list.extra}
+            busy={busy}
+            onSwitch={onSwitch}
+            onDisable={onDisable}
+            onInspect={onInspect}
+            onAdd={onAdd}
+          />,
+        )}
         {pane("float", <UiSection />)}
       </div>
     </div>

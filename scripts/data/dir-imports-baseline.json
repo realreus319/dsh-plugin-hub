@@ -1,60 +1,69 @@
 {
-  "$comment": "S0 门禁基线（#690）：结构型计数由 verify-dir-imports.mjs --write-baseline 登记（随新增文件/目录合法上升）；质量型计数（leafModuleCycles/fileCycles/raLegacy*/implToOtherImpl/missingInterface/directImpl）与 uncoveredSrcFiles 只许降不许升，--write-baseline 不更新它们，须人工处置。",
-  "version": 1,
+  "$comment": "S0 门禁基线（#690 / #733 后续）：结构型计数由 verify-dir-imports.mjs --write-baseline 登记；quality 段存质量型**证据集合**（边 from|to|kind、环签名、未覆盖源文件），新增证据判红、消失即清理、kind 降级（type→value）判红；放宽的唯一通道是 scripts/data/gate-exemptions.json 的登记条目（gate=verify-dir-imports，path=<包名>:<证据项>，必填 reason+trackingIssue，可选 reviewBy，条目失效由反向腐烂校验判红）。",
+  "version": 2,
   "packages": {
-    "dsh-notifier": {
-      "modules": 8,
-      "scannedSrcFiles": 38,
-      "allSrcTsFiles": 42,
-      "interfaceFacades": 8,
-      "leafValueEdges": 8,
-      "leafModuleCycles": 0,
-      "fileValueEdges": 67,
-      "fileCycles": 0,
-      "crossModuleRefs": 97,
-      "raLegacy": 39,
-      "raLegacyValue": 15,
-      "raLegacyType": 24,
-      "implToOtherImpl": 0,
-      "missingInterface": 0,
-      "directImpl": 0,
-      "uncoveredSrcFiles": []
-    },
     "dsh-lan-proxy": {
       "modules": 0,
       "scannedSrcFiles": 8,
       "allSrcTsFiles": 13,
       "interfaceFacades": 0,
       "leafValueEdges": 0,
-      "leafModuleCycles": 0,
       "fileValueEdges": 17,
-      "fileCycles": 0,
       "crossModuleRefs": 0,
-      "raLegacy": 0,
-      "raLegacyValue": 0,
-      "raLegacyType": 0,
-      "implToOtherImpl": 0,
-      "missingInterface": 0,
-      "directImpl": 0,
-      "uncoveredSrcFiles": []
+      "quality": {
+        "leafModuleCycles": [],
+        "fileCycles": [],
+        "implToOtherImpl": [],
+        "missingInterface": [],
+        "directImpl": [],
+        "uncoveredSrcFiles": []
+      }
     },
     "dsh-mcp-manager": {
       "modules": 14,
       "scannedSrcFiles": 63,
       "allSrcTsFiles": 78,
       "interfaceFacades": 14,
-      "leafValueEdges": 34,
-      "leafModuleCycles": 4,
-      "fileValueEdges": 117,
-      "fileCycles": 4,
+      "leafValueEdges": 33,
+      "fileValueEdges": 116,
       "crossModuleRefs": 134,
-      "raLegacy": 91,
-      "raLegacyValue": 52,
-      "raLegacyType": 39,
-      "implToOtherImpl": 0,
-      "missingInterface": 0,
-      "directImpl": 1,
-      "uncoveredSrcFiles": []
+      "quality": {
+        "leafModuleCycles": [
+          "catalog|config/model|connection|connection/orchestrator",
+          "catalog|connection|connection/orchestrator",
+          "catalog|connection|connection/orchestrator|connection/runtime",
+          "connection|connection/orchestrator|connection/runtime"
+        ],
+        "fileCycles": [
+          "catalog/interface.ts|catalog/search.ts|connection/interface.ts|connection/runtime/interface.ts|connection/runtime/middleware.ts",
+          "connection/interface.ts|connection/runtime/interface.ts|connection/runtime/middleware.ts",
+          "connection/interface.ts|connection/runtime/interface.ts|connection/runtime/supervisor.ts",
+          "connection/orchestrator/interface.ts|connection/orchestrator/manager.ts"
+        ],
+        "implToOtherImpl": [],
+        "missingInterface": [],
+        "directImpl": [
+          "connection/interface.ts|connection/orchestrator/tool-names.ts"
+        ],
+        "uncoveredSrcFiles": []
+      }
+    },
+    "dsh-notifier": {
+      "modules": 9,
+      "scannedSrcFiles": 89,
+      "allSrcTsFiles": 93,
+      "interfaceFacades": 9,
+      "leafValueEdges": 6,
+      "fileValueEdges": 76,
+      "crossModuleRefs": 67,
+      "quality": {
+        "leafModuleCycles": [],
+        "fileCycles": [],
+        "implToOtherImpl": [],
+        "missingInterface": [],
+        "directImpl": [],
+        "uncoveredSrcFiles": []
+      }
     },
     "dsh-provider-usage": {
       "modules": 13,
@@ -62,17 +71,24 @@
       "allSrcTsFiles": 69,
       "interfaceFacades": 13,
       "leafValueEdges": 35,
-      "leafModuleCycles": 1,
       "fileValueEdges": 123,
-      "fileCycles": 1,
       "crossModuleRefs": 174,
-      "raLegacy": 157,
-      "raLegacyValue": 106,
-      "raLegacyType": 51,
-      "implToOtherImpl": 1,
-      "missingInterface": 0,
-      "directImpl": 1,
-      "uncoveredSrcFiles": []
+      "quality": {
+        "leafModuleCycles": [
+          "domain2/common|domain2/schedule"
+        ],
+        "fileCycles": [
+          "domain2/common/interface.ts|domain2/common/last-run.ts|domain2/schedule/interface.ts|domain2/schedule/scheduler.ts"
+        ],
+        "implToOtherImpl": [
+          "apply/report-config-service.ts|domain2/schedule/config.ts|value"
+        ],
+        "missingInterface": [],
+        "directImpl": [
+          "apply/report-config-service.ts|domain2/schedule/config.ts"
+        ],
+        "uncoveredSrcFiles": []
+      }
     },
     "dsh-verify-isolated": {
       "modules": 0,
@@ -80,17 +96,16 @@
       "allSrcTsFiles": 1,
       "interfaceFacades": 0,
       "leafValueEdges": 0,
-      "leafModuleCycles": 0,
       "fileValueEdges": 0,
-      "fileCycles": 0,
       "crossModuleRefs": 0,
-      "raLegacy": 0,
-      "raLegacyValue": 0,
-      "raLegacyType": 0,
-      "implToOtherImpl": 0,
-      "missingInterface": 0,
-      "directImpl": 0,
-      "uncoveredSrcFiles": []
+      "quality": {
+        "leafModuleCycles": [],
+        "fileCycles": [],
+        "implToOtherImpl": [],
+        "missingInterface": [],
+        "directImpl": [],
+        "uncoveredSrcFiles": []
+      }
     },
     "dsh-web-file-preview": {
       "modules": 0,
@@ -98,17 +113,16 @@
       "allSrcTsFiles": 4,
       "interfaceFacades": 0,
       "leafValueEdges": 0,
-      "leafModuleCycles": 0,
       "fileValueEdges": 1,
-      "fileCycles": 0,
       "crossModuleRefs": 0,
-      "raLegacy": 0,
-      "raLegacyValue": 0,
-      "raLegacyType": 0,
-      "implToOtherImpl": 0,
-      "missingInterface": 0,
-      "directImpl": 0,
-      "uncoveredSrcFiles": []
+      "quality": {
+        "leafModuleCycles": [],
+        "fileCycles": [],
+        "implToOtherImpl": [],
+        "missingInterface": [],
+        "directImpl": [],
+        "uncoveredSrcFiles": []
+      }
     }
   }
 }

@@ -8,7 +8,12 @@
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReportConfig, ReportPeriod } from "../schedule/interface.ts";
-import { alignLastRun, deriveLastRun, LAST_RUN_SCHEMA, type LastRunRecord } from "../schedule/interface.ts";
+import {
+  alignLastRun,
+  deriveLastRun,
+  LAST_RUN_SCHEMA,
+  type LastRunRecord,
+} from "../schedule/interface.ts";
 import { parseReportIndexLines } from "./report-index.ts";
 
 /** lastRun 持久化文件。 */
@@ -32,11 +37,18 @@ export async function readLastRun(root: string): Promise<Partial<Record<ReportPe
 }
 
 /** 原子写 lastRun（tmp+rename，0600；带 schema 版本）。 */
-export async function writeLastRun(root: string, state: Partial<Record<ReportPeriod, string>>): Promise<void> {
+export async function writeLastRun(
+  root: string,
+  state: Partial<Record<ReportPeriod, string>>,
+): Promise<void> {
   const file = lastRunFile(root);
   await mkdir(join(root, "reports"), { recursive: true });
   const tmp = `${file}.${Date.now()}.tmp`;
-  await writeFile(tmp, JSON.stringify({ ...state, schema: LAST_RUN_SCHEMA, updatedAt: Date.now() }), { mode: 0o600 });
+  await writeFile(
+    tmp,
+    JSON.stringify({ ...state, schema: LAST_RUN_SCHEMA, updatedAt: Date.now() }),
+    { mode: 0o600 },
+  );
   await rename(tmp, file);
 }
 
@@ -64,7 +76,12 @@ const lastRunChainByRoot = new Map<string, Promise<void>>();
 
 export function updateLastRun(
   root: string,
-  patch: (prev: Partial<Record<ReportPeriod, string>>) => Partial<Record<ReportPeriod, string>>,
+  // 返回类型必须容纳 Promise：patch 允许实现成 async（用于模拟读-改-写之间的交错窗），
+  // 下面 await 它的结果。只声明同步形态属「签名撒谎」——await 非 Promise 不会报错也不会
+  // 等待，一旦有人照着类型写同步实现并依赖这里真的等了，就是静默的时序 bug（#764 命中）。
+  patch: (
+    prev: Partial<Record<ReportPeriod, string>>,
+  ) => Partial<Record<ReportPeriod, string>> | Promise<Partial<Record<ReportPeriod, string>>>,
 ): Promise<void> {
   const prev = lastRunChainByRoot.get(root) ?? Promise.resolve();
   const run = async (): Promise<void> => {
@@ -74,7 +91,10 @@ export function updateLastRun(
     await writeLastRun(root, await patch(cur as Partial<Record<ReportPeriod, string>>));
   };
   const next = prev.then(run, run);
-  const tail = next.then(() => undefined, () => undefined);
+  const tail = next.then(
+    () => undefined,
+    () => undefined,
+  );
   lastRunChainByRoot.set(root, tail);
   return next;
 }
@@ -91,7 +111,11 @@ export function __lastRunChainForTests(root: string): Promise<void> | undefined 
 export async function ensureLastRunMigrated(
   root: string,
   warn?: (msg: string) => void,
-): Promise<{ changed: boolean; before: Partial<Record<ReportPeriod, string>>; after: Partial<Record<ReportPeriod, string>> }> {
+): Promise<{
+  changed: boolean;
+  before: Partial<Record<ReportPeriod, string>>;
+  after: Partial<Record<ReportPeriod, string>>;
+}> {
   const diag = warn ?? ((msg: string) => console.warn(`[dsh-provider-usage] report: ${msg}`));
   try {
     const raw = await readFile(lastRunFile(root), "utf8").catch(() => null);
@@ -106,7 +130,9 @@ export async function ensureLastRunMigrated(
     const changed = schema < LAST_RUN_SCHEMA || JSON.stringify(before) !== JSON.stringify(after);
     if (changed) {
       await writeLastRun(root, after);
-      diag(`lastRun 已按 index 事实校准（schema ${schema}→${LAST_RUN_SCHEMA}）：${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+      diag(
+        `lastRun 已按 index 事实校准（schema ${schema}→${LAST_RUN_SCHEMA}）：${JSON.stringify(before)} → ${JSON.stringify(after)}`,
+      );
     }
     return { changed, before, after };
   } catch (e: unknown) {

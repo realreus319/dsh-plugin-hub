@@ -6,7 +6,7 @@
   "main": "lib/index.js",
   "scripts": {
     "build": "node ../../scripts/build/clean-lib.ts && tsc -p tsconfig.json && node ../../scripts/build/bundle-host.ts .",
-    "test": "node ../../scripts/test/run-vitest.mjs --min 37",
+    "test": "node ../../scripts/test/run-vitest.mjs --min 35",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "pnpm run typecheck && pnpm run build && pnpm test"
   },
@@ -46,7 +46,9 @@
     "@deepseek-ai/dsh-host-webserver": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-session-title": "catalog:",
-    "@deepseek-ai/dsh-user-approval": "catalog:"
+    "@deepseek-ai/dsh-settings": "catalog:",
+    "@deepseek-ai/dsh-user-approval": "catalog:",
+    "@deepseek-ai/dsh-user-questions": "catalog:"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "catalog:",
@@ -54,7 +56,9 @@
     "@deepseek-ai/dsh-host-webserver": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-session-title": "catalog:",
-    "@deepseek-ai/dsh-user-approval": "catalog:"
+    "@deepseek-ai/dsh-settings": "catalog:",
+    "@deepseek-ai/dsh-user-approval": "catalog:",
+    "@deepseek-ai/dsh-user-questions": "catalog:"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -72,7 +76,13 @@
     "@deepseek-ai/dsh-session-title": {
       "optional": true
     },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-user-approval": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-questions": {
       "optional": true
     }
   },

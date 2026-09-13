@@ -34,7 +34,7 @@ on:
   schedule:
     # 每日全量变异与基线刷新（#276 方案 A + #433 调度重设计）：北京次日 04:00
     # = UTC 20:00，避开整点 Actions 高峰（增量班已于 #718 S2.2 退役）
-    - cron: '0 20 * * *'
+    - cron: "0 20 * * *"
   workflow_dispatch:
 
 permissions:
@@ -127,8 +127,19 @@ jobs:
 
       # CRAP 于 #722 阶段五完成 src 口径重建（复杂度取自 ESLint 的 complexity 规则，
       # 覆盖率取自同一份 src 口径产物，两者行号可比），恢复接入本班次。
+      # 覆盖率面交叉断言：产物（coverage/coverage-final.json）已产出，此时验「产物 keys ⊆ include
+      # 面」才有意义——PR 组 A 跑本闸时产物还不存在，那里的执行点只覆盖结构与面完整性。
+      - name: Coverage scope（产物交叉断言）
+        run: node scripts/gate/verify-coverage-scope.mjs
+
       - name: CRAP（热点报告；strict 见 gauntlet.config.json 的 crap.strict）
         run: pnpm crap
+
+      # #765：豁免/临时项到期台账（纯报告，脚本退出码恒 0，不会让本班变红）。
+      # 放夜间全量班而不是 PR 路径——它的用途是排期复核（人工裁决续期或收口），
+      # 每次 PR 都打印同一份存量台账只会变成噪音。
+      - name: Exemption ledger（豁免到期台账，仅报告）
+        run: node scripts/gate/collect-exemptions.mjs
 
       - name: Upload coverage summary（供 mutation-collect 的报告展示；#718 S1.5）
         # 报告正文同时含覆盖率与变异率，故覆盖率产物必须跨 job 传递。
@@ -263,7 +274,7 @@ jobs:
         if: steps.reports.outputs.count != '0'
         run: |
           set -e
-          node scripts/gate/observe-check.mjs --body-file observe-body.md --marker-file observe-marker.txt
+          node scripts/gate/observe-check.mjs --body-file observe-body.md --marker-file observe-marker.txt --status-file observe-status.json
           # 报告与回落标记均以文件传递（#204：$GITHUB_OUTPUT 多行值在中文+换行内容下
           # 触发 "Matching delimiter not found" 解析失败；GitHub 官方文档明示值不可控时
           # 应写文件而非用 delimiter 格式）。下游步骤直接读 observe-body.md /
@@ -284,22 +295,41 @@ jobs:
         run: node scripts/gate/orphan-baseline.mjs archive
 
       - name: Create/update observe issue（幂等：同日重跑不重复建；回落即追评）
-        if: always() && steps.report.outcome == 'success'
+        # #765 G1：原条件 `steps.report.outcome == 'success'` 恰好把**违约夜**排除在外——
+        # 违约正是判分 exit 1 的那一刻，于是只剩正常夜有工单（实测最后一张 = #683 /
+        # 2026-09-09，其后违约夜零工单）。改为只看「本班是否产出了段报告」，并按判分状态
+        # 文件走三态：无正文 → 诊断工单；有正文 → 正常建/追评。
+        if: always() && steps.reports.outputs.count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           TITLE="chore(observe): 夜间质量报告 $(date -u +%Y-%m-%d)"
+          BODY=observe-body.md
+          if [ ! -s "$BODY" ]; then
+            echo "::error::判分未产出报告正文（$BODY 缺失或为空）—— 以诊断工单留痕"
+            {
+              echo "## 夜间质量报告（判分无数据）"
+              echo
+              echo "本班次判分未产出报告正文，无法给出覆盖率 / 变异率结论。判分状态文件："
+              echo
+              echo '```json'
+              cat observe-status.json 2>/dev/null || echo '(状态文件亦缺失)'
+              echo '```'
+            } > "$BODY"
+          fi
           EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')
           if [ -n "$EXISTING" ]; then
             echo "issue #$EXISTING 已存在，跳过创建"
           else
-            gh issue create --title "$TITLE" --body-file observe-body.md
+            gh issue create --title "$TITLE" --body-file "$BODY"
           fi
-          # F6 回落闭环：标记文件非空 = 存在指标回落 → 在当日 issue 上追加警示评论
+          # F6 回落闭环：标记文件非空 = 存在指标回落 → 在当日 issue 上追加警示评论。
+          # bash 陷阱：`if ...; then ...; fi` 整体实测 exit 0，`set -e` 不会传播 gh 的失败，
+          # 故这里显式告警——评论失败不该让整班变红，但也不能无声吞掉。
           if [ -s observe-marker.txt ]; then
             NUM=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')
-            gh issue comment "$NUM" --body-file observe-marker.txt || true
+            gh issue comment "$NUM" --body-file observe-marker.txt || echo "::warning::回落评论追加失败（issue #$NUM）"
           fi
 
       - name: Upload artifacts（coverage / mutation 报告留档）

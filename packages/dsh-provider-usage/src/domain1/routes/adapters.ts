@@ -5,7 +5,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { WebRoute } from "@deepseek-ai/dsh-host-webserver";
-import { guardLoopbackMethod, readJsonBody, writeJson } from "../../../../../shared/host-utils.js";
+import {
+  guardLoopbackMethod,
+  readJsonBodyOutcome,
+  writeJson,
+} from "../../../../../shared/host-utils.js";
 import { ADAPTER_CONTRACT_VERSION } from "../../shared/interface.ts";
 import type { StatsService } from "../pipeline/interface.ts";
 import { loadUserAdapterChecked } from "../registry/interface.ts";
@@ -65,19 +69,20 @@ export async function handleSelect(
   if (!guardLoopbackMethod(req, res, ["POST"])) return;
   const { statsService } = context;
 
-  let body: Record<string, unknown>;
-  try {
-    const raw = await readJsonBody(req);
-    if (typeof raw !== "object" || raw === null) return writeJson(res, 400, { error: "bad-json" });
-    body = raw as Record<string, unknown>;
-  } catch {
-    return writeJson(res, 400, { error: "bad-json" });
-  }
+  const outcome = await readJsonBodyOutcome(req);
+  if (outcome.kind !== "json") return writeJson(res, 400, { error: "bad-json" });
+  const body = outcome.value as Record<string, unknown>;
 
   const provider = typeof body.provider === "string" ? body.provider : "";
   const clearing = body.adapterName === null;
   const adapterName = typeof body.adapterName === "string" ? body.adapterName : "";
-  if (!clearing && (provider.length === 0 || adapterName.length === 0 || provider.length > 128 || adapterName.length > 128)) {
+  if (
+    !clearing &&
+    (provider.length === 0 ||
+      adapterName.length === 0 ||
+      provider.length > 128 ||
+      adapterName.length > 128)
+  ) {
     return writeJson(res, 400, { error: "invalid provider/adapterName" });
   }
 
@@ -101,18 +106,16 @@ export async function handleInspect(
   if (!guardLoopbackMethod(req, res, ["POST"])) return;
   const { statsService } = context;
 
-  let body: Record<string, unknown>;
-  try {
-    const raw = await readJsonBody(req);
-    if (typeof raw !== "object" || raw === null) return writeJson(res, 400, { error: "bad-json" });
-    body = raw as Record<string, unknown>;
-  } catch {
-    return writeJson(res, 400, { error: "bad-json" });
-  }
+  const outcome = await readJsonBodyOutcome(req);
+  if (outcome.kind !== "json") return writeJson(res, 400, { error: "bad-json" });
+  const body = outcome.value as Record<string, unknown>;
 
   const file = resolveAddAdapterFile(body.file);
   if (file === undefined) {
-    return writeJson(res, 400, { error: "invalid-file", detail: "文件不存在/不可读，或路径未规整（禁穿越）" });
+    return writeJson(res, 400, {
+      error: "invalid-file",
+      detail: "文件不存在/不可读，或路径未规整（禁穿越）",
+    });
   }
 
   const loaded = await loadUserAdapterChecked(file, statsService.registry);
@@ -123,7 +126,12 @@ export async function handleInspect(
   const { adapter } = loaded;
   writeJson(res, 200, {
     ok: true,
-    adapter: { name: adapter.name, label: adapter.label ?? adapter.name, providers: adapter.providers, version: adapter.version },
+    adapter: {
+      name: adapter.name,
+      label: adapter.label ?? adapter.name,
+      providers: adapter.providers,
+      version: adapter.version,
+    },
     file: basename(file),
   });
 }
@@ -136,18 +144,16 @@ export async function handleAdd(
   if (!guardLoopbackMethod(req, res, ["POST"])) return;
   const { statsService, ensureHotReload } = context;
 
-  let body: Record<string, unknown>;
-  try {
-    const raw = await readJsonBody(req);
-    if (typeof raw !== "object" || raw === null) return writeJson(res, 400, { error: "bad-json" });
-    body = raw as Record<string, unknown>;
-  } catch {
-    return writeJson(res, 400, { error: "bad-json" });
-  }
+  const outcome = await readJsonBodyOutcome(req);
+  if (outcome.kind !== "json") return writeJson(res, 400, { error: "bad-json" });
+  const body = outcome.value as Record<string, unknown>;
 
   const file = resolveAddAdapterFile(body.file);
   if (file === undefined) {
-    return writeJson(res, 400, { error: "invalid-file", detail: "文件不存在/不可读，或路径未规整（禁穿越）" });
+    return writeJson(res, 400, {
+      error: "invalid-file",
+      detail: "文件不存在/不可读，或路径未规整（禁穿越）",
+    });
   }
 
   const loaded = await loadUserAdapterChecked(file, statsService.registry);
@@ -157,11 +163,17 @@ export async function handleAdd(
 
   const { adapter } = loaded;
   if (statsService.registry.hasName(adapter.name)) {
-    return writeJson(res, 409, { error: "duplicate-name", detail: `适配器 name 已存在：${adapter.name}` });
+    return writeJson(res, 409, {
+      error: "duplicate-name",
+      detail: `适配器 name 已存在：${adapter.name}`,
+    });
   }
 
   if (!statsService.registry.register(adapter, "user-file", file)) {
-    return writeJson(res, 422, { error: "invalid-adapter", detail: "契约校验失败（version/name/providers/fetchData/formatCapsule/formatPanel）" });
+    return writeJson(res, 422, {
+      error: "invalid-adapter",
+      detail: "契约校验失败（version/name/providers/fetchData/formatCapsule/formatPanel）",
+    });
   }
 
   const rec: UserAdapterRecord = {
@@ -179,7 +191,12 @@ export async function handleAdd(
 
   writeJson(res, 200, {
     ok: true,
-    adapter: { name: adapter.name, label: adapter.label ?? adapter.name, providers: adapter.providers, file: basename(file) },
+    adapter: {
+      name: adapter.name,
+      label: adapter.label ?? adapter.name,
+      providers: adapter.providers,
+      file: basename(file),
+    },
     enabled: statsService.registry.snapshot().enabled,
   });
 }

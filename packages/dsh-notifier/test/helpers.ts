@@ -1,393 +1,250 @@
-// @ts-nocheck（e2e/集成面类型化技术债：桩对象密集，暂不参与 test/tsconfig 编译）
 /**
- * dsh-notifier — smoke 测试共享辅助（fake ctx / fake req/res / fake settings / 轮询）。
+ * dsh-notifier — 测试共享夹具（支撑模块）。
  *
- * 配置走官方 settings 命名空间：makeNotifier 注入 fake settings 服务
- * （register/describe/update），apply 的组合层配置经 sanitizeSettings 过滤后作为
- * 命名空间 base 层；user 层可由测试经 ctxOverrides.settings 预置或 PUT 写入断言。
- *
- * 无副作用模块：不创建临时目录、不触发 apply；work 目录由各测试文件
- * 自建自清（隔离文件路径，防 flake 纪律见 docs/DEVELOPMENT.md）。
+ * 为什么放在 `test/` 根而不是 `test/unit/` 下：它不是测试条目——不进任何测试层、也不计
+ * `--min`（门禁口径是 `test/` 下的全部 `*.test.ts`；同名先例见 dsh-mcp-manager /
+ * dsh-provider-usage 的 `test/helpers.ts`）。
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Agent } from "@deepseek-ai/dsh-agent";
-import type { Context } from "@deepseek-ai/cordis";
-import assert from "node:assert/strict";
-import { apply, normalizeConfig, sanitizeSettings, SETTINGS_NS } from "../src/index.ts";
 
-/** loopback 合法请求构造（remoteAddress 可覆盖）。 */
-export function fakeReq(overrides = {}) {
-  return {
-    socket: { remoteAddress: "127.0.0.1" },
-    headers: { host: "127.0.0.1:3080", "sec-fetch-site": "same-origin" },
-    method: "GET",
-    url: "/",
-    ...overrides,
+import { vi } from "vitest";
+
+import type { Agent } from "@deepseek-ai/dsh-agent";
+import type { WebRoute } from "@deepseek-ai/dsh-host-webserver";
+import type { DeliverResult } from "../src/server/channels/impl/deliver/type.ts";
+import type { AgentRegistryPort } from "../src/server/events/deps.ts";
+import type { LoggerPort } from "../src/server/shared/interface.ts";
+
+/**
+ * 临时改写环境变量，返回还原函数。
+ *
+ * 还原语义按「原本是否存在」分两类：原本不存在则删除而不是写成空串——空串与未设置在
+ * `dshHome()` 里同义（空白视同未设置），但在别的读取方那里可能不同义，夹具不该替它们决定。
+ */
+export function withEnv(overrides: Record<string, string | undefined>): () => void {
+  const saved = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    saved.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   };
 }
 
-/** 响应收集器：rec.status / rec.headers / rec.text。 */
-export function makeRes() {
-  const rec = { status: 0, text: "" };
+/**
+ * 隔离 DSH home：本次测试的全部落盘进独占的临时目录，跑完连目录一起删。
+ *
+ * `dispose` 必须进 `afterEach`/`afterAll`：漏掉会让后续用例继承上一个用例的 `DSH_HOME`，
+ * 症状是「单跑绿、连跑红」，而且写出来的文件在仓库外，自查 `git status` 看不见。
+ */
+export function tempDshHome(): { readonly dir: string; dispose: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-notifier-test-"));
+  const restore = withEnv({ DSH_HOME: dir });
   return {
-    rec,
-    res: {
-      writeHead(status, headers) {
-        rec.status = status;
-        rec.headers = headers;
-      },
-      write(text) {
-        rec.text += text;
-      },
-      end(text) {
-        if (text !== undefined) rec.text += text;
-      },
-      on() {},
+    dir,
+    dispose: () => {
+      restore();
+      rmSync(dir, { recursive: true, force: true });
     },
   };
 }
 
 /**
- * fake settings 服务（官方 SettingsServiceLike 最小面：register/describe/update）。
- * register 返回 owner scope（get/watch/update），解析值 = normalizeConfig(base+user)；
- * update 可选做 revision 乐观并发（expectedRevision 不匹配抛 SETTINGS_CONFLICT）。
- * @param options.base 组合层通知配置（apply entry，sanitize 后）。
- * @param options.user 预置 user 层（GET user 断言 / 迁移目标）。
- * @param options.log 可选记录 update 调用的钩子（断言「只提交变更键」）。
+ * 轮询直到谓词成立，超时抛错。
+ *
+ * 为什么不用固定 sleep：等 50ms 与「异步确实完成了」不是一回事，慢 runner 上就是 flake。
+ * 为什么超时**抛错**而不是返回 false：静默返回 false 会让调用方把「没等到」读成「条件不成立」，
+ * 于是用例继续往下断言一个从未发生的事实，红在离原因很远的地方。
  */
-export function makeFakeSettings(options = {}) {
-  const base = options.base && typeof options.base === "object" ? options.base : {};
-  let user = { ...((options.user && typeof options.user === "object") ? options.user : {}) };
-  let revision = 0;
-  const scopeWatchCbs = [];
-  const updateCalls = [];
-  const log = options.log || (() => {});
+export async function pollUntil(
+  predicate: () => boolean,
+  label: string,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() > deadline) throw new Error(`pollUntil: ${label} 在 ${timeoutMs}ms 内未成立`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
-  const scope = {
-    get() {
-      return normalizeConfig({ ...base, ...user });
+/** 宿主日志出口的假实现：记下 warn 文案供断言，而不是让失败面消失在控制台里。 */
+export function makeLogger(): LoggerPort & { readonly warns: string[] } {
+  const warns: string[] = [];
+  return {
+    warns,
+    warn: (message: string) => {
+      warns.push(message);
     },
-    watch(cb) {
-      scopeWatchCbs.push(cb);
+  };
+}
+
+/** 请求桩参数：`method` 与 `url` 是每个域自己的事实，其余按需覆盖。 */
+interface JsonReqOptions {
+  readonly method: string;
+  readonly url: string;
+  readonly body?: unknown;
+  readonly rawBody?: string;
+  readonly remoteAddress?: string;
+  readonly host?: string;
+}
+
+/**
+ * 请求桩：只造被测代码会读的那几个字段。
+ *
+ * 不给 `rawBody` 时按 `body` 序列化，给了就原样进流——解析失败面要的正是「原样进流的脏文本」，
+ * 走 `JSON.stringify` 反而测不到它。
+ */
+export function jsonReq(options: JsonReqOptions): IncomingMessage {
+  const text = options.rawBody ?? (options.body === undefined ? "" : JSON.stringify(options.body));
+  return {
+    method: options.method,
+    url: options.url,
+    headers: { host: options.host ?? "127.0.0.1:3080" },
+    socket: { remoteAddress: options.remoteAddress ?? "127.0.0.1" },
+    async *[Symbol.asyncIterator]() {
+      if (text !== "") yield Buffer.from(text, "utf8");
+    },
+  } as unknown as IncomingMessage;
+}
+
+/**
+ * 响应桩：`headersSent` 是真实 getter（端点靠它判「还能不能写头」，写成普通字段会让那条判据恒真），
+ * `json()` 直接解析累积正文，省掉每个文件各写一遍 `JSON.parse(rec.text)`。
+ */
+export function makeRes(): {
+  readonly res: ServerResponse;
+  readonly rec: {
+    status: number;
+    headers: Record<string, string>;
+    text: string;
+    headersSent: boolean;
+  };
+  readonly json: () => Record<string, unknown>;
+} {
+  const rec = { status: 0, headers: {} as Record<string, string>, text: "", headersSent: false };
+  const res = {
+    get headersSent() {
+      return rec.headersSent;
+    },
+    writeHead(status: number, headers?: Record<string, string>) {
+      rec.status = status;
+      rec.headers = { ...(headers ?? {}) };
+      rec.headersSent = true;
+      return res;
+    },
+    end(chunk?: string) {
+      if (chunk !== undefined) rec.text += chunk;
+      rec.headersSent = true;
+      return res;
+    },
+  };
+  return {
+    res: res as unknown as ServerResponse,
+    rec,
+    json: (): Record<string, unknown> => JSON.parse(rec.text),
+  };
+}
+
+/** 路由注册桩：记下收到的路由与它们的摘除动作——「卸载后旧 handler 还挂着」只有靠它才看得见。 */
+export function makeRegister(): {
+  readonly routes: WebRoute[];
+  readonly disposed: string[];
+  readonly register: (route: WebRoute) => () => void;
+} {
+  const routes: WebRoute[] = [];
+  const disposed: string[] = [];
+  return {
+    routes,
+    disposed,
+    register: (route: WebRoute): (() => void) => {
+      routes.push(route);
       return () => {
-        const i = scopeWatchCbs.indexOf(cb);
-        if (i !== -1) scopeWatchCbs.splice(i, 1);
+        disposed.push(route.path);
       };
     },
-    update(patch) {
-      const prev = normalizeConfig({ ...base, ...user });
-      Object.assign(user, patch);
-      revision += 1;
-      updateCalls.push({ patch: JSON.parse(JSON.stringify(patch)), via: "scope" });
-      log({ via: "scope", patch });
-      fireWatch(prev);
-    },
-  };
-  const service = {
-    register(ns, schema, opts) {
-      return scope;
-    },
-    describe(opts = {}) {
-      return [{ ns: SETTINGS_NS, user: { ...user }, revision }];
-    },
-    async update(ns, patch, expectedRevision) {
-      if (expectedRevision !== undefined && expectedRevision !== revision) {
-        throw Object.assign(new Error("settings conflict"), { code: "SETTINGS_CONFLICT", expected: expectedRevision, actual: revision });
-      }
-      const prev = normalizeConfig({ ...base, ...user });
-      Object.assign(user, patch);
-      revision += 1;
-      updateCalls.push({ patch: JSON.parse(JSON.stringify(patch)), via: "service" });
-      log({ via: "service", patch });
-      fireWatch(prev);
-    },
-  };
-  /** 提交后触发 scope.watch 回调（官方语义：异步串行；测试同步即可）。 */
-  function fireWatch(prev) {
-    for (const cb of [...scopeWatchCbs]) {
-      try {
-        cb(normalizeConfig({ ...base, ...user }), prev);
-      } catch {
-        // 回调异常不阻断（与官方 contained-watcher 语义一致）
-      }
-    }
-  }
-  return {
-    scope,
-    service,
-    getUser: () => ({ ...user }),
-    getRevision: () => revision,
-    getUpdateCalls: () => updateCalls,
-    setUser(next) { user = { ...next }; },
   };
 }
 
+/** 取失败明细的 reason。成功结果说明用例前提不成立：当场炸掉，别让断言落在一个不存在的事实上。 */
+export function reasonOf(result: DeliverResult): string {
+  if (result.status !== "failed") throw new Error(`期望失败，实际 ${result.status}`);
+  return result.reason;
+}
+
+/** 取失败结果的可重试标记；非失败同上处理。 */
+export function retryableOf(result: DeliverResult): boolean {
+  if (result.status !== "failed") throw new Error(`期望失败，实际 ${result.status}`);
+  return result.retryable;
+}
+
 /**
- * fake cordis ctx：路由表 + 事件监听器表 + effect（真实语义：fn 立即同步
- * 执行，返回值收集为 disposer）+ get/provide（服务读取面）+ inject（服务注入面，
- * 供 installNotifierSettings 挂 settings）。
+ * 假 Agent 注册表：`live` 是 id → Agent，`owned` 是「子 id + 父 Agent」对。
  *
- * 未注入访问抛错镜像：Proxy 对未注入属性（如 ctx.agents）
- * 抛与真实 cordis 同构的错误 `cannot get property "<name>" without inject`
- * ——修复前形态（ctx.agents 直读）在 fake ctx 下同样红，杜绝根因 A 穿透
- * 门禁的测试盲区。`ctx.get(name, false)` 缺位安全返回 undefined（镜像
- * ReflectService.get 语义）；override 直接注入的「服务」属性（如 { agents }）
- * 也经 get 读取面可达，兼容按属性注入的既有用例。
+ * 与 sdk 的 `makeRegister`（种类登记）只差一个字，故这里叫 `makeAgentRegistry`。
  */
-export function makeFakeCtx(overrides = {}) {
-  const routes = [];
-  const listeners = new Map();
-  /** 服务读取面：provide 注册 + override 直接注入的服务属性。 */
-  const services = new Map();
-  /** effect 收集的 disposer（卸载面：sse.dispose / 定时器清理等，dispose 逐项执行）。 */
-  const effects = [];
-  const base = {
-    logger: { warn: () => {}, info: () => {} },
-    webServer: {
-      register(route) {
-        routes.push(route);
-        return () => {};
-      },
-    },
-    on(event, handler) {
-      if (!listeners.has(event)) listeners.set(event, []);
-      listeners.get(event).push(handler);
-      return () => {};
-    },
-    effect(fn) {
-      const disposer = fn();
-      const d = typeof disposer === "function" ? disposer : () => {};
-      effects.push(d);
-      return d;
-    },
-    get(name) {
-      if (services.has(name)) return services.get(name);
-      if (Object.prototype.hasOwnProperty.call(base, name)) return base[name];
-      return undefined;
-    },
-    provide(name, value) {
-      services.set(name, value);
-      return () => services.delete(name);
-    },
-    inject(serviceNames, fn) {
-      // 服务面注入（installNotifierSettings 经此挂 settings）：仅处理已注册服务
-      if (Array.isArray(serviceNames) && serviceNames.includes("settings")) {
-        const settings = services.get("settings");
-        if (!settings) return;
-        const sctx = {
-          settings,
-          effect(f2) {
-            const d = f2();
-            return typeof d === "function" ? d : () => {};
-          },
-        };
-        fn(sctx);
-      }
-    },
-    ...overrides,
-  };
-  // 未注入访问抛错镜像（真实 cordis 严格属性访问）：symbol/保留键（then/
-  // prototype）按真实 proxy 语义直接放行，其余未注入键抛错。
-  const ctx = new Proxy(base, {
-    get(target, prop) {
-      if (typeof prop === "symbol" || prop === "then" || prop === "prototype" || String(prop).startsWith("_")) {
-        return Reflect.get(target, prop);
-      }
-      if (Reflect.has(target, prop)) return Reflect.get(target, prop);
-      throw new Error(`cannot get property "${String(prop)}" without inject`);
-    },
-    has(target, prop) {
-      return Reflect.has(target, prop);
-    },
-  }) as unknown as Context;
-  return { ctx, routes, listeners, effects };
-}
-
-/** 收集 logger.info 的 ctx（通知触发的观测面）。 */
-export function makeLoggingCtx() {
-  const infos = [];
-  const { ctx, routes, listeners } = makeFakeCtx({
-    logger: { warn: () => {}, info: (text) => infos.push(text) },
-  });
-  return { ctx, routes, listeners, infos };
-}
-
-/**
- * apply 一份 notifier。配置走 fake settings 命名空间：
- * @param workDir 该测试文件的临时目录。
- * @param config apply 配置覆盖（通知字段作为组合层 entry/base；enabled /
- *   configFile/toastScript/historyFile 为装配覆盖）。
- * @param ctxOverrides makeFakeCtx 覆盖（如注入 settings 服务 / 自定义 logger）。
- * @returns 附带 fake settings 句柄（getUser/getUpdateCalls 断言写入面）。
- */
-export function makeNotifier(workDir, config = {}, ctxOverrides = {}) {
-  const entry = (sanitizeSettings(config) ?? {}) || {};
-  const settingsOpts = ctxOverrides.settings || {};
-  const fakeSettings = makeFakeSettings({ base: entry, ...settingsOpts });
-  const { ctx, routes, listeners, effects } = makeFakeCtx({
-    ...ctxOverrides,
-    settings: undefined, // 确保 override 的 settings 字段不污染服务读取面
-  });
-  ctx.provide("settings", fakeSettings.service);
-  apply(ctx, {
-    enabled: true,
-    configFile: join(workDir, "config.json"),
-    toastScript: join(workDir, "toast.ps1"),
-    historyFile: join(workDir, "history.jsonl"),
-    statusFile: join(workDir, "status.json"),
-    ...config,
-  });
+export function makeAgentRegistry(
+  options: { live?: Agent[]; owned?: ReadonlyArray<readonly [string, string]> } = {},
+): AgentRegistryPort {
+  const live = new Map((options.live ?? []).map((agent) => [String(agent.id), agent]));
   return {
-    ctx, routes, listeners, settings: fakeSettings,
-    /** 卸载面：执行全部 effect disposer（sse.dispose / 定时器清理）。
-     *  每个测试场景结束后调用，避免 30s unref 心跳在进程存活期内残留。 */
-    dispose: () => {
-      for (const d of effects) {
-        try { d(); } catch { /* 忽略 */ }
-      }
+    lookup: (id) => {
+      const agent = live.get(String(id));
+      return agent === undefined ? { found: false } : { found: true, agent };
     },
+    isOwnedBy: (id, owner) =>
+      (options.owned ?? []).some(
+        ([child, parent]) => child === String(id) && parent === String(owner.id),
+      ),
   };
 }
 
-/**
- * 轮询 history 路由直到满足谓词（替代固定 sleep，消除 CI 时序竞态导致的 flake）。
- * 配合每实例独立 history 文件使用：写入来自同一 apply 单写链（串行），
- * 轮询仅兜底落盘时序，不依赖「等够固定毫秒」。
- */
-export async function waitForHistory(historyRoute, predicate, timeoutMs = 2000) {
-  const start = Date.now();
-  for (;;) {
-    const { rec, res } = makeRes();
-    await historyRoute.handler(fakeReq({}), res);
-    let records = [];
-    try { records = JSON.parse(rec.text).records || []; } catch { /* 解析失败则下一轮重试 */ }
-    if (predicate(records)) return records;
-    if (Date.now() - start > timeoutMs) return records;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+/** 跨边界喂值：编译期联合不代表运行时的值也在枚举里，守的正是编译期管不到的那一侧。 */
+export function wire<T>(value: unknown): T {
+  return value as T;
 }
 
 /**
- * 带会话标题/子代理身份/turn/end 的 agent 辅助（模拟 dsh-session-title 与
- * dsh-agent-loop 写入的日志；真实宿主跑完一轮必有 turn/end 落盘）。
- * opts.turnEnd：turn 号（有则追加一条 turn/end 事件）；
- * opts.turnEndKind：reason.kind（默认 completed，aborted 模拟用户中断）；
- * opts.subagent：true 模拟子代理（写入 origin:'subagent'，与 DSH childSessionMeta 一致）；
- * opts.parentSession：模拟 fork/派生会话（只写 parentSession、不带 origin；
- *   是否委派 worker 由运行时归属面 fakeAgents 决定）；
- * opts.seedLength：header.seedLength（fork 型委派持久化形态含该字段，
- *   完成判定不含它——仅用于构造注释宣称的完整 header 形态）；
- * opts.depth：header.delegationDepth（仅作附加，不作子代理判据）；
- * opts.cwd：header.cwd（模拟 headless CLI 会话「header 仅 {cwd}」形态）。
- * 0.1.2-rc.1 起 session.events getter 移除：fake 暴露 snapshotEvents()（无参语义
- * 等价旧 getter），与真实宿主形态一致。
+ * 排一次宏任务，把在飞的微任务链走完。
  *
- * 返回类型显式标注为官方 `Agent`（#733 M2-3.3）：本文件是 @ts-nocheck 的桩对象
- * 技术债文件，此前返回类型隐式为匿名对象，导致「把 fake agent 传进已类型化的
- * `resolveTurnEvidence(agent: Agent)`」在 typed 测试里不可赋值。标注把「这个桩
- * 代指 Agent」这一事实写清，而不是让签名为迁就桩对象退回 any。代价是标注本身
- * 不受 tsc 校验（@ts-nocheck），属该文件既有技术债的一部分（#733 第八节 T-6）。
+ * 钉住时钟时不能用 `pollUntil`（它的截止时间读 `Date.now()`，谓词不成立就永不超时），
+ * 而这类等待又不需要真的等时间——要的只是「队列排空」。
  */
-export function agentWithTitle(id, title, opts = {}): Agent {
-  const events = [];
-  if (opts.turnEnd !== undefined) {
-    events.push({ type: "turn/end", data: { turn: opts.turnEnd, reason: { kind: opts.turnEndKind ?? "completed" } } });
-  }
-  if (title) events.push({ type: "session/title", data: { title } });
-  const header = {};
-  if (opts.subagent) header.origin = "subagent";
-  if (opts.parentSession !== undefined) header.parentSession = opts.parentSession;
-  if (opts.seedLength !== undefined) header.seedLength = opts.seedLength;
-  if (opts.depth !== undefined) header.delegationDepth = opts.depth;
-  if (opts.cwd !== undefined) header.cwd = opts.cwd;
-  return {
-    id,
-    session: {
-      header: Object.keys(header).length > 0 ? header : undefined,
-      snapshotEvents: () => events,
-    },
-  };
+export function settleMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
-/**
- * 完成轮两态时序构造（单源 push + 快照兜底收敛后必需）：
- * 真实宿主中 agent/status running 派发于本轮 turn 开始——本轮 turn/end 尚未
- * post-commit 落盘，session.snapshotEvents() 最新条目为上一轮（或空）；idle 派发于本轮
- * turn/end 落盘之后。单源收敛的 runningBaseline 冻结判据（idle 快照 ≤ running
- * 基线 = 本轮无新 closure = abort-early 陈旧快照，冻结不误报）依赖该时序——
- * 旧测试「running 与 idle 同一构造（events 已含本轮 closure）」在单源语义下会
- * 被正确识别为无新 closure 而静默（abort 早于本轮 turn/start 落盘的形态）。
- * 故所有「本轮完成」用例必须区分 running/idle 两态事件面：
- *   - running 态 = 上一轮 turn/end（prevTurn，可缺省 = 首轮无 closure）
- *   - idle 态 = 本轮 turn/end（thisTurn，lastTurnEndOf 只取最新一条，单条等价）
- * 每次调用返回全新 { running, idle } 两态（agent/status 事件不持有引用）。
- *
- * @param id agent/session id
- * @param title 任务标题（agentWithTitle 同款）
- * @param headerOpts agentWithTitle 的 header 选项（subagent/parentSession/seedLength/depth/cwd）
- * @param thisTurn 本轮 turn/end：{ turn, kind? }（写入 idle 态；kind 默认 completed）
- * @param prevTurn 上一轮 turn/end：{ turn, kind? }（写入 running 态；缺省 = 首轮）
- */
-export function turnPair(id, title, headerOpts = {}, thisTurn, prevTurn) {
-  const running = agentWithTitle(
-    id,
-    title,
-    prevTurn !== undefined
-      ? { ...headerOpts, turnEnd: prevTurn.turn, turnEndKind: prevTurn.kind ?? "completed" }
-      : headerOpts
-  );
-  const idle = agentWithTitle(id, title, { ...headerOpts, turnEnd: thisTurn.turn, turnEndKind: thisTurn.kind ?? "completed" });
-  return { running, idle };
+/** 一次 fetch 调用的记录：URL、header、body 分开放，「凭据不许落 URL」这类判据才写得出来。 */
+export interface FetchCall {
+  readonly url: string;
+  readonly method: string | undefined;
+  readonly headers: Record<string, string>;
+  readonly body: string;
+  readonly signal: AbortSignal | null | undefined;
 }
 
-/**
- * 运行时归属模拟面：ctx.agents 判定所需最小实现。
- * @param liveIds live registry 中存在的父/子 agent id 数组。
- * @param ownedPairs 归属关系对 [childId, ownerId]：isOwnedBy(childId, owner)
- *   仅当 owner 在 live 且存在对应关系对时返回 true。
- */
-export function fakeAgents(liveIds = [], ownedPairs = []) {
-  const live = new Map(liveIds.map((id) => [id, { id }]));
-  return {
-    get(id) {
-      return live.get(id);
-    },
-    isOwnedBy(id, owner) {
-      if (owner === undefined || !live.has(owner.id)) return false;
-      return ownedPairs.some(([child, parent]) => child === id && parent === owner.id);
-    },
-  };
+/** 全局 fetch 桩：出口用例全程无网络；用完必须 `afterEach(() => vi.unstubAllGlobals())`。 */
+export function stubFetch(respond: (call: FetchCall) => Response | Promise<Response>): FetchCall[] {
+  const calls: FetchCall[] = [];
+  vi.stubGlobal("fetch", (input: unknown, init?: RequestInit) => {
+    const call: FetchCall = {
+      url: String(input),
+      method: init?.method,
+      headers: { ...(init?.headers as Record<string, string> | undefined) },
+      body: typeof init?.body === "string" ? init.body : "",
+      signal: init?.signal,
+    };
+    calls.push(call);
+    return Promise.resolve().then(() => respond(call));
+  });
+  return calls;
 }
-
-/**
- * 免打扰窗口动态构造：写死 "00:00"/"23:59" 假设全天覆盖，
- * 但 isInQuietHours 是半开区间 [start, end)，23:59 这一分钟（minutes=1439）
- * 恒不命中——CI（UTC 时区）在 23:58 开跑的慢 runner 恰好把断言推进到 23:59
- * 这一分钟时，quietHours 判定失效、通知未被拦截（run 33282203798 根因）。
- * 围绕当前时间 ±halfSpanMinutes 构造，任何时区/任何时刻运行恒命中；
- * now 邻近 00:00 时 start > end，天然走实现的跨午夜分支（quiet-hours.ts）。
- * @param halfSpanMinutes 窗口半宽（分钟，默认 2）
- */
-export function quietWindowNow(halfSpanMinutes = 2) {
-  const hhmm = (offsetMinutes) => {
-    const t = new Date(Date.now() + offsetMinutes * 60_000);
-    return `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
-  };
-  return { enabled: true, start: hhmm(-halfSpanMinutes), end: hhmm(halfSpanMinutes) };
-}
-
-/** 等待聚合窗口过期（默认 doneMergeWindowMs=3000）；windowMs 传实际窗口值
- *  （测试注入短窗如 50ms，缩短套件等待：6 处调用 19.2s → ~1.8s）。 */
-export async function waitMergeWindow(windowMs = 3000) {
-  await new Promise((resolve) => setTimeout(resolve, windowMs + 250));
-}
-
-/**
- * session/event 回调的 turn/end 载荷构造（双源测试用）。
- * 形态对齐官方 SessionEvent 信封的最小判定子集：{ type, data: { turn, reason } }。
- */
-export function turnEndEvent(turn, kind = "completed") {
-  return { type: "turn/end", data: { turn, reason: { kind } } };
-}
-
-export { assert };

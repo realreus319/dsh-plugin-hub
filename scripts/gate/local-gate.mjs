@@ -8,9 +8,13 @@
  * 脚本把同一份包面归属搬到本地，并统一「PR 也走增量」的口径：
  *
  *   changed  命中包的 build + test + typecheck（迭代快线；命中全局面时自动升到 pr）
- *   pr       快线 + **命中包**产物闸（contract / pack:check / verify:npmlayout 切片）
- *            + 廉价全仓一致性闸（秒级静态检查，不依赖 lib 产物）
- *   full     全仓口径（= 夜间班次口径；发版前或改过构建链时跑）
+ *   pr       **全仓**口径：全仓 build + test + typecheck + 产物闸（contract / pack:check /
+ *            verify:npmlayout，均传全包包名）+ 廉价全仓一致性闸（秒级静态检查，不依赖 lib 产物）
+ *   full     同 pr（口径相同），另加豁免到期台账收集；`--with-coverage` 时补 cov / crap
+ *
+ * 注意 pr/full 两档都是**全仓**对象面，与 CI 的「PR 默认增量」不同——本文件只把增量留给
+ * changed 快线（CI 的增量由 paths-filter 切片承担，本地没有 PR 上下文可切）。因此本地 pr
+ * ≈ CI 的 gate:full 减去覆盖率与变异（那两项归夜间）。
  *
  * 必须全量的东西（全仓产物闸、覆盖率、变异）不在 PR 口径里：它们归 CI 夜间班次
  * （observe.yml），本地只在 --with-coverage 时按需补覆盖率。
@@ -20,200 +24,305 @@
  *   node scripts/gate/local-gate.mjs [--tier changed|pr|full] [--base <ref>] [--dry-run] [--with-coverage]
  * 退出码：0 = 全部通过；1 = 某步失败（首个失败即停，摘要列出全部已跑步骤的 exit code）。
  */
-import { spawnSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import process from 'node:process'
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import process from "node:process";
 
-import { computeCiMatrix } from '../ci/ci-matrix.mjs'
-import { PREREQ_PACKAGES } from '../test/script-test-prereqs.mjs'
-import { planChangedScope } from './local-scope.mjs'
+import { computeCiMatrix } from "../ci/ci-matrix.mjs";
+import { PREREQ_PACKAGES } from "../test/script-test-prereqs.mjs";
+import { planChangedScope } from "./local-scope.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
-const TIER_ALIAS = { changed: 'changed', fast: 'changed', pr: 'pr', full: 'full' }
+const TIER_ALIAS = { changed: "changed", fast: "changed", pr: "pr", full: "full" };
 
 function sh(cmd, args) {
-  return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8' })
+  return spawnSync(cmd, args, { cwd: ROOT, encoding: "utf8" });
 }
 
 function gitLines(args) {
-  const res = sh('git', args)
-  if (res.status !== 0) return null
-  return res.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+  const res = sh("git", args);
+  if (res.status !== 0) return null;
+  return res.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
+/**
+ * 本次改动文件集。
+ *
+ * 基准取 `merge-base(base, HEAD)`（三点比的等价物），而不是裸 `base`：两点比会把
+ * 主干上先于本分支的提交算成「本次改动」——本地因此放大跑的面，并在 base 前进后产生
+ * 与 CI 无关的假命中。
+ *
+ * 与 CI 的关系是「近似」而非「相等」：PR 事件上 dorny/paths-filter 走 REST
+ * `pulls.listFiles`（显式 base 被忽略），语义 ≈ 三点比；差异有二——重命名会被折叠成
+ * add+removed、单 PR 超过 3000 文件时截断。
+ *
+ * `--diff-filter` 必须含 D：删除同样是「包内改动」——删掉一个域/模块正是最需要重跑该包
+ * build/test/typecheck 的形态。旧实现的 ACMR 让纯删除改动在本地判成「无命中包、无需跑
+ * 门禁」，而 CI 会命中 → 本地绿 CI 红。
+ */
 function resolveChangedFiles(base) {
-  const verified = sh('git', ['rev-parse', '--verify', '--quiet', `${base}^{commit}`])
-  if (verified.status !== 0) return null
-  const tracked = gitLines(['diff', '--name-only', '--diff-filter=ACMR', base])
-  const untracked = gitLines(['ls-files', '--others', '--exclude-standard'])
-  if (tracked === null || untracked === null) return null
-  return [...new Set([...tracked, ...untracked])]
+  const verified = sh("git", ["rev-parse", "--verify", "--quiet", `${base}^{commit}`]);
+  if (verified.status !== 0) return null;
+  const mergeBase = sh("git", ["merge-base", base, "HEAD"]);
+  const ref = mergeBase.status === 0 ? mergeBase.stdout.trim() : base;
+  const tracked = gitLines(["diff", "--name-only", "--diff-filter=ACMRDT", ref]);
+  const untracked = gitLines(["ls-files", "--others", "--exclude-standard"]);
+  if (tracked === null || untracked === null) return null;
+  return [...new Set([...tracked, ...untracked])];
 }
 
 /** 每个步骤 = { label, args }；args 交给 pnpm。 */
-function tierSteps(tier, { hitPackages, withCoverage }) {
-  const pkgFilters = hitPackages.map((p) => `./packages/${p}`)
-  const scopedBuild = hitPackages.map((p) => `@wingsky-1/${p}...`)
-  const scopeArg = hitPackages.join(',')
+function tierSteps(tier, { hitPackages, withCoverage, base, scopeLabel }) {
+  const pkgFilters = hitPackages.map((p) => `./packages/${p}`);
+  const scopedBuild = hitPackages.map((p) => `@wingsky-1/${p}...`);
+  const scopeArg = hitPackages.join(",");
 
-  if (tier === 'changed') {
-    const steps = []
+  if (tier === "changed") {
+    const steps = [];
     if (hitPackages.length > 0) {
-      steps.push({ label: `build（命中包 + 依赖：${hitPackages.join(', ')}）`, args: [...scopedBuild.flatMap((f) => ['--filter', f]), 'build'] })
+      steps.push({
+        label: `build（命中包 + 依赖：${hitPackages.join(", ")}）`,
+        args: [...scopedBuild.flatMap((f) => ["--filter", f]), "build"],
+      });
       for (const filter of pkgFilters) {
-        steps.push({ label: `test ${filter}`, args: ['--filter', filter, '--if-present', 'test'] })
+        steps.push({ label: `test ${filter}`, args: ["--filter", filter, "--if-present", "test"] });
       }
       for (const filter of pkgFilters) {
-        steps.push({ label: `typecheck ${filter}`, args: ['--filter', filter, '--if-present', 'typecheck'] })
+        steps.push({
+          label: `typecheck ${filter}`,
+          args: ["--filter", filter, "--if-present", "typecheck"],
+        });
       }
     }
-    return steps
+    return steps;
   }
 
   // 廉价全仓一致性闸：不依赖 lib 产物、秒级，恒跑（不是「全量构建」类成本）。
   // test:scripts 不在此列——它有编译面用例依赖声明产物，需先满足前置包（见下方）。
   const cheapGlobal = [
-    { label: 'stryker:check（变异配置与拓扑一致）', args: ['stryker:check'] },
-    { label: 'aggregate:check（聚合 patch 不漂移）', args: ['aggregate:check'] },
-    { label: 'test:src-tests（*.src.test.ts 禁现）', args: ['test:src-tests'] },
-    { label: 'gate:homedir（src 禁直连 HOME）', args: ['gate:homedir'] },
-    { label: 'docs:check（README/链接）', args: ['docs:check'] },
-    { label: 'lint（ESLint 复杂度门禁，阈值见 gauntlet.config.json）', args: ['lint'] },
-  ]
+    // 阈值单调性原先只在 ci.yml 的 `if: pull_request` 下跑——本地三档都跑不到它，
+    // 「悄悄降线」要等 CI 才红（本地判绿的假象）。判据本身与 CI 同一入口，成本秒级。
+    // 基准取 --base（默认 origin/main，与 CI 的硬编码一致）；取不到该 ref 时判据自身
+    // fail-closed（exit 2），与本地其余步骤「取不到基准即按最严处理」的口径一致。
+    {
+      label: `threshold-monotonic（阈值只许升不许降，基准 ${base}）`,
+      cmd: "node",
+      args: ["scripts/gate/threshold-monotonic.mjs", base],
+    },
+    { label: "stryker:check（变异配置与拓扑一致）", args: ["stryker:check"] },
+    { label: "aggregate:check（聚合 patch 不漂移）", args: ["aggregate:check"] },
+    { label: "test:src-tests（*.src.test.ts 禁现）", args: ["test:src-tests"] },
+    { label: "gate:homedir（src 禁直连 HOME）", args: ["gate:homedir"] },
+    // #733 计划项 3.1.2：本闸原先只在 contract-check.ts 里 spawnSync，不进 cheapGlobal，
+    // 于本地增量档不可见；现与兄弟闸一致（CI 侧同为直接步骤）。
+    { label: "gate:module-state（src 禁模块级可变状态）", args: ["gate:module-state"] },
+    { label: "docs:check（README/链接）", args: ["docs:check"] },
+    {
+      label: "verify:scripts-index（scripts 索引：存在性 + 引用即登记）",
+      args: ["verify:scripts-index"],
+    },
+    {
+      label: "verify:coverage-scope（覆盖率面：单一事实源 + 面完整性）",
+      args: ["verify:coverage-scope"],
+    },
+    { label: "lint（ESLint 复杂度门禁，阈值见 gauntlet.config.json）", args: ["lint"] },
+    // #733 计划项 3.5：形态的 CI 执行点在 ci.yml（repo-gate 恒跑段），本地同款接入——
+    // 否则「本地全绿、CI 红在 format」这种落差会天天发生。面见 .prettierignore。
+    { label: "format:check（Prettier 形态，代码面全量）", args: ["format:check"] },
+  ];
   const prereqStep = {
-    label: `build 编译面前置包（test:scripts 依赖：${PREREQ_PACKAGES.join(', ')}）`,
+    label: `build 编译面前置包（test:scripts 依赖：${PREREQ_PACKAGES.join(", ")}）`,
     // --filter 与取值必须是两个独立 argv 元素（与本文件其余步骤同写法）；拼成单个
     // 字符串会被 pnpm 当成一个未知选项：Unknown options: 'filter @wingsky-1/<pkg>...'
-    args: [...PREREQ_PACKAGES.flatMap((p) => ['--filter', `@wingsky-1/${p}...`]), 'build'],
-  }
-  const scriptsSelfTest = { label: 'test:scripts（门禁脚本自测）', args: ['test:scripts'] }
+    args: [...PREREQ_PACKAGES.flatMap((p) => ["--filter", `@wingsky-1/${p}...`]), "build"],
+  };
+  const scriptsSelfTest = { label: "test:scripts（门禁脚本自测）", args: ["test:scripts"] };
 
-  if (tier === 'pr') {
+  if (tier === "pr") {
     // PR 增量口径：命中包构建/测试 + **命中包**产物闸 + 廉价全仓一致性闸。
     // 全仓产物闸（无 --packages）与覆盖率/变异归夜间，本地只在 gate:full 跑。
-    const steps = []
+    const steps = [];
     if (hitPackages.length > 0) {
-      steps.push({ label: `build（命中包 + 依赖：${hitPackages.join(', ')}）`, args: [...scopedBuild.flatMap((f) => ['--filter', f]), 'build'] })
+      steps.push({
+        label: `build（命中包 + 依赖：${hitPackages.join(", ")}）`,
+        args: [...scopedBuild.flatMap((f) => ["--filter", f]), "build"],
+      });
       for (const filter of pkgFilters) {
-        steps.push({ label: `test ${filter}`, args: ['--filter', filter, '--if-present', 'test'] })
+        steps.push({ label: `test ${filter}`, args: ["--filter", filter, "--if-present", "test"] });
       }
       for (const filter of pkgFilters) {
-        steps.push({ label: `typecheck ${filter}`, args: ['--filter', filter, '--if-present', 'typecheck'] })
+        steps.push({
+          label: `typecheck ${filter}`,
+          args: ["--filter", filter, "--if-present", "typecheck"],
+        });
       }
     }
     steps.push(
-      { label: `contract（切片 ${hitPackages.length} 包）`, cmd: 'node', args: ['scripts/gate/contract-check.ts', '--packages', scopeArg] },
-      { label: `pack:check（切片 ${hitPackages.length} 包）`, cmd: 'node', args: ['scripts/gate/pack-check.ts', '--packages', scopeArg] },
-      { label: `verify:npmlayout（切片 ${hitPackages.length} 包）`, cmd: 'node', args: ['scripts/gate/verify-npm-layout.ts', '--packages', scopeArg] },
+      {
+        label: `contract（${scopeLabel}）`,
+        cmd: "node",
+        args: ["scripts/gate/contract-check.ts", "--packages", scopeArg],
+      },
+      {
+        label: `pack:check（${scopeLabel}）`,
+        cmd: "node",
+        args: ["scripts/gate/pack-check.ts", "--packages", scopeArg],
+      },
+      {
+        label: `verify:npmlayout（${scopeLabel}）`,
+        cmd: "node",
+        args: ["scripts/gate/verify-npm-layout.ts", "--packages", scopeArg],
+      },
       ...cheapGlobal,
       prereqStep,
       scriptsSelfTest,
-    )
-    return steps
+    );
+    return steps;
   }
 
   const steps = [
-    { label: 'build（全仓）', args: ['build'] },
-    { label: 'test（全仓）', args: ['test'] },
-    { label: 'typecheck（全仓）', args: ['typecheck'] },
-    { label: 'contract（全仓）', args: ['contract'] },
-    { label: 'pack:check（全仓）', args: ['pack:check'] },
-    { label: 'verify:npmlayout（全仓）', args: ['verify:npmlayout'] },
+    { label: "build（全仓）", args: ["build"] },
+    { label: "test（全仓）", args: ["test"] },
+    { label: "typecheck（全仓）", args: ["typecheck"] },
+    { label: `contract（${scopeLabel}）`, args: ["contract"] },
+    { label: `pack:check（${scopeLabel}）`, args: ["pack:check"] },
+    { label: `verify:npmlayout（${scopeLabel}）`, args: ["verify:npmlayout"] },
     ...cheapGlobal,
     scriptsSelfTest,
-  ]
+    // 豁免/临时项到期台账：只在全量档收集打印（纯报告，退出码恒 0）。增量档不跑——
+    // PR 上反复打印同一份存量台账只会变成噪音，而它的用途是排期复核（裁决见 #765）。
+    {
+      label: "豁免到期台账（收集 reviewBy，仅报告）",
+      cmd: "node",
+      args: ["scripts/gate/collect-exemptions.mjs"],
+    },
+  ];
   if (withCoverage) {
-    steps.push({ label: 'cov（vitest 覆盖率，unit + integration 直连 src）', args: ['cov'] })
+    steps.push({ label: "cov（vitest 覆盖率，unit + integration 直连 src）", args: ["cov"] });
     // crap 于 #722 阶段五完成 src 口径重建（复杂度取自 ESLint 的 complexity 规则，覆盖率取自
     // 同一份 src 口径产物），与 cov 同批恢复接入。
-    steps.push({ label: 'crap（CRAP 热点，strict 见 gauntlet.config.json）', args: ['crap'] })
+    steps.push({ label: "crap（CRAP 热点，strict 见 gauntlet.config.json）", args: ["crap"] });
   }
-  return steps
+  return steps;
 }
 
 function main(argv) {
-  const tierArg = valueOf(argv, '--tier') ?? 'changed'
-  const tier = TIER_ALIAS[tierArg]
+  const tierArg = valueOf(argv, "--tier") ?? "changed";
+  const tier = TIER_ALIAS[tierArg];
   if (tier === undefined) {
-    console.error(`[local-gate] 未知 --tier ${tierArg}（可选 changed / pr / full）`)
-    return 2
+    console.error(`[local-gate] 未知 --tier ${tierArg}（可选 changed / pr / full）`);
+    return 2;
   }
-  const base = valueOf(argv, '--base') ?? 'origin/main'
-  const dryRun = argv.includes('--dry-run')
-  const withCoverage = argv.includes('--with-coverage')
+  const base = valueOf(argv, "--base") ?? "origin/main";
+  const dryRun = argv.includes("--dry-run");
+  const withCoverage = argv.includes("--with-coverage");
 
-  const { allPackages } = computeCiMatrix({ env: {} })
+  const { allPackages } = computeCiMatrix({ env: {} });
 
-  let files = null
-  let scopeReason = ''
-  if (tier === 'changed') {
-    files = resolveChangedFiles(base)
+  let files = null;
+  let scopeReason = "";
+  if (tier === "changed") {
+    files = resolveChangedFiles(base);
     if (files === null) {
-      scopeReason = `取不到 diff 基准 ${base}（或 git 不可用）—— 按全量处理（fail-closed）`
-      files = null
+      scopeReason = `取不到 diff 基准 ${base}（或 git 不可用）—— 按全量处理（fail-closed）`;
+      files = null;
     }
   }
 
-  let plan
-  if (tier !== 'changed') {
-    plan = { hitPackages: [...allPackages], globalHit: false, escalated: false, reason: `--tier ${tier}：全仓口径` }
+  let plan;
+  if (tier !== "changed") {
+    plan = {
+      hitPackages: [...allPackages],
+      globalHit: false,
+      escalated: false,
+      reason: `--tier ${tier}：全仓口径`,
+    };
   } else if (files === null) {
-    plan = { hitPackages: [...allPackages], globalHit: true, escalated: false, reason: scopeReason }
+    plan = {
+      hitPackages: [...allPackages],
+      globalHit: true,
+      escalated: false,
+      reason: scopeReason,
+    };
   } else {
-    plan = planChangedScope({ root: ROOT, files, allPackages })
+    plan = planChangedScope({ root: ROOT, files, allPackages });
   }
 
   // 全局面命中（改 shared/scripts/.github/包管理文件）时，changed 快线不足以覆盖静态闸，升到 pr
-  let effectiveTier = tier
-  if (tier === 'changed' && plan.globalHit) effectiveTier = 'pr'
+  let effectiveTier = tier;
+  if (tier === "changed" && plan.globalHit) effectiveTier = "pr";
 
-  const steps = tierSteps(effectiveTier, { hitPackages: plan.hitPackages, withCoverage })
-  const escalated = effectiveTier !== tier
+  const scopeLabel =
+    plan.hitPackages.length === allPackages.length
+      ? "全仓口径"
+      : `切片 ${plan.hitPackages.length} 包：${plan.hitPackages.join(", ")}`;
+  const steps = tierSteps(effectiveTier, {
+    hitPackages: plan.hitPackages,
+    withCoverage,
+    base,
+    scopeLabel,
+  });
+  const escalated = effectiveTier !== tier;
 
-  console.log(`[local-gate] tier=${tier}${escalated ? ` → 升级为 ${effectiveTier}` : ''}  base=${base}  变更文件=${files === null ? 'n/a' : files.length}`)
-  console.log(`[local-gate] 包面：${plan.hitPackages.length > 0 ? plan.hitPackages.join(', ') : '（无）'}  —— ${plan.reason}`)
+  console.log(
+    `[local-gate] tier=${tier}${escalated ? ` → 升级为 ${effectiveTier}` : ""}  base=${base}  变更文件=${files === null ? "n/a" : files.length}`,
+  );
+  console.log(
+    `[local-gate] 包面：${plan.hitPackages.length > 0 ? plan.hitPackages.join(", ") : "（无）"}  —— ${plan.reason}`,
+  );
   if (plan.unknown && plan.unknown.length > 0) {
-    console.log(`[local-gate] 注意：ci.yml filters 里的 ${plan.unknown.join(', ')} 不在包清单内，已忽略（若为新增包请同步 plugins-manifest.json）`)
+    console.log(
+      `[local-gate] 注意：ci.yml filters 里的 ${plan.unknown.join(", ")} 不在包清单内，已忽略（若为新增包请同步 plugins-manifest.json）`,
+    );
   }
   if (steps.length === 0) {
-    console.log('[local-gate] 无命中包面且已升级未触发 —— 纯文档/meta 改动，本地无需跑包级门禁（CI 静态闸仍会跑）')
-    return 0
+    console.log(
+      "[local-gate] 无命中包面且已升级未触发 —— 纯文档/meta 改动，本地无需跑包级门禁（CI 静态闸仍会跑）",
+    );
+    return 0;
   }
-  console.log('[local-gate] 计划步骤：')
-  for (const s of steps) console.log(`  - ${s.label}`)
+  console.log("[local-gate] 计划步骤：");
+  for (const s of steps) console.log(`  - ${s.label}`);
   if (dryRun) {
-    console.log('[local-gate] --dry-run：未执行')
-    return 0
+    console.log("[local-gate] --dry-run：未执行");
+    return 0;
   }
 
-  const results = []
+  const results = [];
   for (const step of steps) {
-    console.log(`\n[local-gate] ▶ ${step.label}\n[local-gate]   ${step.cmd ?? PNPM} ${step.args.join(' ')}`)
-    const res = spawnSync(step.cmd ?? PNPM, step.args, { cwd: ROOT, stdio: 'inherit' })
-    const code = res.status ?? 1
-    results.push({ label: step.label, code })
+    console.log(
+      `\n[local-gate] ▶ ${step.label}\n[local-gate]   ${step.cmd ?? PNPM} ${step.args.join(" ")}`,
+    );
+    const res = spawnSync(step.cmd ?? PNPM, step.args, { cwd: ROOT, stdio: "inherit" });
+    const code = res.status ?? 1;
+    results.push({ label: step.label, code });
     if (code !== 0) {
-      console.error(`\n[local-gate] ✗ ${step.label} 退出码 ${code} —— 后续步骤不再执行（fail-fast）`)
-      break
+      console.error(
+        `\n[local-gate] ✗ ${step.label} 退出码 ${code} —— 后续步骤不再执行（fail-fast）`,
+      );
+      break;
     }
   }
 
-  console.log('\n[local-gate] 执行摘要：')
-  for (const r of results) console.log(`  exit=${r.code}  ${r.label}`)
-  const skipped = steps.length - results.length
-  for (const s of steps.slice(results.length)) console.log(`  exit=skip  ${s.label}`)
-  const failed = results.some((r) => r.code !== 0)
-  if (skipped > 0) console.log(`[local-gate] 因首个失败跳过 ${skipped} 步`)
-  console.log(failed ? '[local-gate] 结果：FAIL' : '[local-gate] 结果：PASS')
-  return failed ? 1 : 0
+  console.log("\n[local-gate] 执行摘要：");
+  for (const r of results) console.log(`  exit=${r.code}  ${r.label}`);
+  const skipped = steps.length - results.length;
+  for (const s of steps.slice(results.length)) console.log(`  exit=skip  ${s.label}`);
+  const failed = results.some((r) => r.code !== 0);
+  if (skipped > 0) console.log(`[local-gate] 因首个失败跳过 ${skipped} 步`);
+  console.log(failed ? "[local-gate] 结果：FAIL" : "[local-gate] 结果：PASS");
+  return failed ? 1 : 0;
 }
 
 function valueOf(argv, flag) {
-  const i = argv.indexOf(flag)
-  return i === -1 ? undefined : argv[i + 1]
+  const i = argv.indexOf(flag);
+  return i === -1 ? undefined : argv[i + 1];
 }
 
-process.exit(main(process.argv.slice(2)))
+process.exit(main(process.argv.slice(2)));

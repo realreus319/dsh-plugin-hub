@@ -53,7 +53,6 @@ const PING_FRAME = 'data: {"type":"ping"}\n\n';
  * @param {number} [options.stalledTimeoutMs] stalled 回收窗口（默认 90s；测试注入短值）。
  * @param {number} [options.maxAgeMs] maxAge 轮换上限（默认 120min；0 = 关闭轮换）。
  * @param {number} [options.idleTimeoutMs] maxAge 轮换的「空闲」门槛（默认 15min）。
- * @param {(message: string) => void} [options.warn] 日志出口（缺省静默）。
  * @returns {import("./sse-hub.d.ts").SseHub}
  */
 export function createSseHub(options) {
@@ -66,7 +65,15 @@ export function createSseHub(options) {
   /** 连接表：Map<响应, 状态>。Map 迭代序 = 插入序，超限淘汰时第一项即最老。 */
   const conns = new Map();
   /** evict 原因计数（health 观测）。 */
-  const evictStats = { close: 0, error: 0, limit: 0, stalled: 0, maxage: 0, destroyed: 0, dispose: 0 };
+  const evictStats = {
+    close: 0,
+    error: 0,
+    limit: 0,
+    stalled: 0,
+    maxage: 0,
+    destroyed: 0,
+    dispose: 0,
+  };
   /** 心跳定时器（unref：不阻止进程退出）。 */
   let heartbeatTimer;
 
@@ -119,7 +126,8 @@ export function createSseHub(options) {
       if (target === undefined) break;
       // 淘汰原因：已 stalled（超窗）记 stalled；否则（最老兜底）记 limit。
       const tgtState = conns.get(target);
-      const reason = tgtState.stalledAt !== undefined && isStalled(tgtState, Date.now()) ? "stalled" : "limit";
+      const reason =
+        tgtState.stalledAt !== undefined && isStalled(tgtState, Date.now()) ? "stalled" : "limit";
       evict(target, reason);
     }
   }

@@ -1,367 +1,300 @@
 /**
- * dsh-notifier — 审批/完成/错误事件通知（宿主端）。
- *
- * 本文件只做装配：apply + 事件订阅 + 生命周期清理；唯一允许 import 全部域
- * interface.ts 的汇聚点（门面纪律）。职责划分按目标目录树：
- * - config/      配置契约/归一化/校验/脱敏/路径/免打扰/settings 接线/桥/迁移
- * - text/        文案单表/脱敏/格式化/系统命令构造（纯函数）
- * - channels/    内置与配置驱动频道（browser/system/bark/webhook/outbound）
- * - server/      SSE 枢纽/系统通知通道/HTTP 路由
- * - pipeline/    裁决与投递工厂（current() 单刻快照 + 单频道 fail-soft）
- * - sdk/         通知中心 service（对外 ABI 实现）
- * - events/      事件处理器/完成聚合/会话读取
- * - stores/      历史 jsonl / 投递状态存储
+ * 宿主端组合根：收窄宿主上下文、按依赖顺序装配各域（`upgrade` 最先因其动磁盘、`api` 最后因其读现值）、卸载逆序释放。
+ * 交付的是能力对象而非装配期快照——设置是活的，快照看起来与实时读取一模一样。
  */
 import type { Context } from "@deepseek-ai/cordis";
-import type {} from "@deepseek-ai/dsh-session/types";
-import type {} from "@deepseek-ai/dsh-session-title";
+import type {} from "@deepseek-ai/dsh-agent";
+import type {} from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-settings";
 import type {} from "@deepseek-ai/dsh-user-approval";
-import { basename, dirname, join } from "node:path";
-import { errorMessage } from "../../../shared/host-utils.js";
-import {
-  BUILTIN_CHANNELS,
-  CONFIG_KEYS,
-  DEFAULT_CONFIG,
-  SETTINGS_NS,
-  configFile,
-  createSettingsBridge,
-  historyFile,
-  installNotifierSettings,
-  isInQuietHours,
-  migrateLegacyConfig,
-  normalizeConfig,
-  resolveSoundSetting,
-  sanitizeSettings,
-  seqFile,
-  statusFile,
-  toastScriptPath,
-} from "./config/interface.ts";
-import type { NotifierApplyConfig, NotifyConfig } from "./config/interface.ts";
-import { HISTORY_LIMIT, createHistoryStore, createStatusStore } from "./stores/interface.ts";
-import { createDoneBatcher, createEventHandlers } from "./events/interface.ts";
-import type { DoneBatcher } from "./events/interface.ts";
-import { sanitizeErrorText } from "./text/interface.ts";
-import type { NotifyDetail } from "./text/interface.ts";
-import { ROUTES, buildRoutes, createSeqStore, createSseHub, createSystemNotifier } from "./server/interface.ts";
-import { createNotifierService } from "./sdk/interface.ts";
-import type { NotifierService, NotifierServiceInternal, NotifySentEvent } from "./sdk/interface.ts";
-import type { BrowserDispatchSpec, DeliverPayload, ResolvedTarget, SystemDispatchSpec } from "./pipeline/interface.ts";
-import { buildBrowserFrame, createBarkChannel, createBrowserChannel, createOutboundChannelResolver, createSystemChannel, createWebhookChannel } from "./channels/interface.ts";
+import type {} from "@deepseek-ai/dsh-user-questions";
+import type { WebRoute } from "@deepseek-ai/dsh-host-webserver";
+import * as apiApi from "./server/api/interface.ts";
+import * as channelsApi from "./server/channels/interface.ts";
+import * as configApi from "./server/config/interface.ts";
+import * as eventsApi from "./server/events/interface.ts";
+import type { AgentRegistryPort, HostEventPort } from "./server/events/interface.ts";
+import * as pipelineApi from "./server/pipeline/interface.ts";
+import type { OutgoingFrame } from "./server/pipeline/interface.ts";
+import type { LegacySettingsFace } from "./server/upgrade/deps.ts";
+import type { ExposePort } from "./server/sdk/deps.ts";
+import * as sdkApi from "./server/sdk/interface.ts";
+import type { NotifierService } from "./server/sdk/interface.ts";
+import type { LoggerPort } from "./server/shared/interface.ts";
+import * as storesApi from "./server/stores/interface.ts";
+import { installUpgrade, releaseUpgrade } from "./server/upgrade/interface.ts";
+
+/**
+ * 对外服务面类型：消费方要写 `const n: NotifierService = ctx["wingsky.notifier"]` 就得能命名它，
+ * 它同时是下面声明合并的载荷。
+ */
+export type { NotifierService } from "./server/sdk/interface.ts";
+
+/** 宿主 settings 服务的名字。它是宿主的知识，不是本插件的 ABI。 */
+const SETTINGS_SERVICE = "settings";
 
 /** 稳定的 cordis 插件名。 */
 export const name = "notifier";
 
-/** 需要的服务：webServer（路由）。 */
-export const inject = ["webServer"];
+/**
+ * 依赖的宿主服务。`settings` 是**必需**依赖而不是可选探测：0.2.3 把配置存在它那里，装配期要读一次存量。
+ * 声明成依赖之后，宿主保证服务就绪才装配本插件——顺序由框架保证，比「先试一次、再监听晚到的」可靠。
+ */
+export const inject = ["webServer", SETTINGS_SERVICE];
 
-// ---------------------------------------------------------------- 导出面
-// 公共符号定义在各域，此处统一 re-export（全部经域 interface.ts 收口）——
-// 包导出面与拆分前完全一致（导出面快照门禁零 diff）。
+/**
+ * 组合层入口配置（插件挂载点传入）。只有总开关：设置项全部住在本插件自己的配置文件里，
+ * 这里再开一层默认值只会让人以为某处配过什么，而它永远是空的。
+ */
+export interface NotifierApplyConfig {
+  /** 总开关；`false` 时一律不投递。不落盘、不进设置层。 */
+  enabled?: boolean;
+}
 
-export { QUIET_ALLOW_KINDS, isInQuietHours, parseHHMM } from "./config/interface.ts";
-export type { QuietHoursConfig } from "./config/interface.ts";
-export {
-  CONFIG_KEYS,
-  DEFAULT_CONFIG,
-  ASSEMBLY_SETTING_KEYS,
-  configFile,
-  historyFile,
-  statusFile,
-  normalizeConfig,
-  sanitizeSettings,
-  sanitizePatchSettings,
-  validateSettings,
-  toastScriptPath,
-  normalizeBarkBaseUrl,
-  normalizeBarkLevels,
-  redactConfigView,
-  unmaskChannels,
-  SECRET_MASK,
-  BARK_ID_PATTERN,
-  BARK_RESERVED_KEYS,
-  SOUND_IDS,
-  isSoundSetting,
-  resolveSoundSetting,
-} from "./config/interface.ts";
-export type { NotifierApplyConfig, NotifyConfig, SettingInvalid, BarkChannelConfig, BarkLevel, SoundId, SoundSetting, SoundChannel } from "./config/interface.ts";
-export { HISTORY_LIMIT } from "./stores/interface.ts";
-export { SETTINGS_NS, installNotifierSettings } from "./config/interface.ts";
-export { migrateLegacyConfig, MIGRATED_BAK_SUFFIX, CORRUPTED_BAK_SUFFIX } from "./config/interface.ts";
-export { createStatusStore } from "./stores/interface.ts";
-export type { StatusStore, ChannelStatusEntry } from "./stores/interface.ts";
-export {
-  createBarkChannel,
-  SEVERITY_LEVEL,
-  BARK_TIMEOUT_MS,
-} from "./channels/interface.ts";
-export {
-  createWebhookChannel,
-  renderWebhookBody,
-  priorityFor,
-  SEVERITY_NTFY_PRIORITY,
-  SEVERITY_GOTIFY_PRIORITY,
-  WEBHOOK_DEFAULT_TIMEOUT_SEC,
-  WEBHOOK_MIN_TIMEOUT_SEC,
-  WEBHOOK_MAX_TIMEOUT_SEC,
-} from "./channels/interface.ts";
-// 浏览器通知帧纯构造（播放层经 DeliverDeps.play 消费；有意新增导出）
-export { buildBrowserFrame } from "./channels/interface.ts";
-export type { MigrationOutcome } from "./config/interface.ts";
-export {
-  buildSystemCommand,
-  buildSoundCommand,
-  formatDuration,
-  prettyToolName,
-  sanitizeErrorText,
-  MAC_SOUND_NAMES,
-  LINUX_TONE_FILES,
-  LINUX_DEFAULT_TONE_FILE,
-  WIN_TONE_FILES,
-  TONE_BASE_DIRS,
-  toneFileCandidates,
-} from "./text/interface.ts";
-export type { NotifyDetail, SystemTone } from "./text/interface.ts";
-export { isSubagentOf, lastTurnEndOf, sessionTitleOf } from "./events/interface.ts";
-export { ROUTES, applyConfigPatch } from "./server/interface.ts";
-export type { PatchResult, RouteDeps } from "./server/interface.ts";
-export { KIND_SEVERITY } from "./text/interface.ts";
-// 内置频道 id 的物理定义在 config 域（最底层）：导出面直指 config，不经 sdk 门面
-// 转发——sdk/interface.ts 的值 re-export 会与 sdk/service.ts 的取值构成文件级值环。
-export { BUILTIN_CHANNELS } from "./config/interface.ts";
-export {
-  createNotifierService,
-  getNotifierService,
-} from "./sdk/interface.ts";
-export type {
-  ChannelCapabilities,
-  KindRegistration,
-  NotifyChannel,
-  NotifyRequest,
-  NotifyResult,
-  NotifierService,
-  NotifierServiceDeps,
-  NotifierServiceInternal,
-  NotifySeverity,
-} from "./sdk/interface.ts";
+/** 挂载 dsh-notifier。 */
+export function apply(ctx: Context, config: NotifierApplyConfig = {}): void {
+  const host = bindHost(ctx);
+  const disposers = assemble(host, config);
+  ctx.effect(() => () => safeDisposeAll(disposers));
+}
 
-export { createSettingsBridge } from "./config/interface.ts";
-export type { SettingsBridge } from "./config/interface.ts";
-export { createEventHandlers } from "./events/interface.ts";
-export type { EventHandlers, EventHandlersDeps } from "./events/interface.ts";
+/**
+ * 宿主事件默认按 fiber 作用域过滤，通知插件必须看到所有会话与 agent，故每条订阅都要带它。
+ * 漏掉的表现是「有些会话不通知」，且只在多会话下出现——单会话调试永远复现不了。
+ */
+const GLOBAL_LISTEN = { global: true } as const;
 
-// 辅助函数统一来自仓库共享层（loopback 围栏 / writeJson / readBody / errorMessage）。
-export { isLoopbackRequest } from "../../../shared/loopback.js";
-export { writeJson, readBody, errorMessage } from "../../../shared/host-utils.js";
-
-// ---------------------------------------------------------------- 类型合并面
-// 声明合并必须物理落在包入口：tsc 的 include 不 emit 源 `.d.ts`（`src/service.d.ts`
-// 因此从未进 `lib/`），消费方从 `lib/index.d.ts` 出发的相对 import 闭包取不到合并，
-// `ctx['wingsky.notifier']` 与 `'wingsky-notify/sent'` 双双失类型。写在本文件则随
-// 入口一起进产物（运行时零影响——声明整块被擦除）。门禁见
-// scripts/gate/pack-check.ts 的「声明合并可达性」断言。
-
+/**
+ * 对外名字的声明合并。必须写在包入口：`declare module` 是全局增强，入口声明面不可达时
+ * `lib/index.d.ts` 里就没有它（`pack:check` 的「声明合并可达性」判据盯这条）；键引用 sdk 域的
+ * 常量，服务名只留一个物理定义——抄一份字面量同样能编译，改名漏改时只会在运行时的另一头暴露。
+ */
 declare module "@deepseek-ai/cordis" {
   interface Context {
-    /** 通知中心核心服务：其他插件经此发送单向通知 / 注册动态通知类型（'wingsky.notifier'）。 */
-    "wingsky.notifier": NotifierService;
-  }
-  /** 投递终态事件（铁律 1 的事件半边；旁观插件 ctx.on 订阅，per-channel 逐条派发）。 */
-  interface Events {
-    "wingsky-notify/sent": (payload: NotifySentEvent) => void;
+    /** 通知中心服务面：兄弟插件经它登记自己的通知种类、发送通知。 */
+    [sdkApi.NOTIFIER_SERVICE]: NotifierService;
   }
 }
 
-function resolveStorePaths(config: NotifierApplyConfig) {
-  const statusPath = typeof config.statusFile === "string" ? config.statusFile : statusFile();
-  // seq 计数器随 status 文件同目录（statusFile 覆盖时测试经
-  // mkdtemp 隔离；未覆盖时 dirname(statusPath)=DSH_HOME，本公式即 seqFile()）。
-  const seqPath = join(dirname(statusPath), basename(seqFile()));
-  return {
-    toastScript: typeof config.toastScript === "string" ? config.toastScript : toastScriptPath(),
-    historyPath: typeof config.historyFile === "string" ? config.historyFile : historyFile(),
-    statusPath,
-    seqPath,
+/**
+ * 帧总线：生产端只给 `emit`（裁决管线），消费端只给 `onFrame`（浏览器出口），类型就是围栏。
+ * 它是组合根的本地设施而不是宿主事件总线上的事件——总线上的名字是公共面，谁都能收发。
+ * 遍历前先取快照：帧是 fire-and-forget 的旁路，回调里退订不该打断本轮其余订阅者。
+ */
+class FrameBus {
+  private readonly handlers = new Set<(payload: OutgoingFrame) => void>();
+
+  emit(payload: OutgoingFrame): void {
+    for (const handler of [...this.handlers]) handler(payload);
+  }
+
+  onFrame(handler: (payload: OutgoingFrame) => void): () => void {
+    this.handlers.add(handler);
+    return () => {
+      this.handlers.delete(handler);
+    };
+  }
+}
+
+/** 组合根用到的宿主面：域拿到的是能力，不是上下文。 */
+interface HostPort {
+  readonly logger: LoggerPort;
+  /** 帧总线：帧经它从裁决管线走到浏览器出口。 */
+  readonly frames: FrameBus;
+  /** 宿主路由注册口：只有组合根够得着 `ctx.webServer`。 */
+  readonly register: (route: WebRoute) => () => void;
+  readonly events: HostEventPort;
+  /** 宿主 agent 注册表：子代理归属判定要它。 */
+  readonly agents: AgentRegistryPort;
+  /**
+   * 宿主 settings 服务：0.2.3 把配置存在那里，新架构搬走后仍需读它一次。
+   * 只声明本域要用的 `describe`——窄面让「本域不认识 settings 的其余能力」成为类型事实。
+   */
+  readonly legacySettings: LegacySettingsFace;
+  /** 宿主出口：把服务面挂上上下文。服务名是 sdk 域的 ABI，组合根不参与命名。 */
+  readonly expose: ExposePort;
+}
+
+function bindHost(ctx: Context): HostPort {
+  /**
+   * 把本插件的处理收进一个「绝不向宿主抛错」的壳里：本插件在宿主事件链上只是旁观者，
+   * 自己出问题不该影响别人的流程。审批与提问这两条是 waterfall，抛出去会让 `next()`
+   * 不被调用，症状是「审批框不弹了」，与本插件毫无字面关联。
+   */
+  const guard = (run: () => void): void => {
+    try {
+      run();
+    } catch (cause) {
+      // 不静默：这里是唯一还知道发生了什么的地方，吞掉之后「通知不工作」会变成查不出原因的现象。
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      ctx.logger.warn(`dsh-notifier: 宿主事件处理失败 —— ${reason}`);
+    }
   };
-}
 
-function safeDisposeAll(disposers: Array<() => void>): void {
-  for (const dispose of disposers) {
-    try {
-      dispose();
-    } catch {
-      // 忽略
-    }
-  }
-}
-
-function createSentEmitter(ctx: Context): (payload: NotifySentEvent) => void {
-  return function emitSent(payload: NotifySentEvent): void {
-    try {
-      // 事件名与载荷类型由本文件下方的 declare module 合并提供（cordis 4.0.2 的
-      // `Context.emit` 是 `emit<K extends keyof Events>(name: K, ...args)` 单一重载）。
-      ctx.emit("wingsky-notify/sent", payload);
-    } catch {
-      // 事件派发失败不影响投递语义（终态仍可见于 status 文件与历史）：ctx 缺 emit
-      //（fake ctx / 宿主降级）时抛出的 TypeError 同样由本 catch 收敛——两种情况的可
-      // 观测结果一致（都不派发、都不外抛）。
-    }
+  return {
+    logger: ctx.logger,
+    frames: new FrameBus(),
+    // 依赖已由 `inject` 声明，服务就绪才轮到本插件装配：这里直接取用，没有探测、也没有迟到分支。
+    legacySettings: ctx.settings,
+    register: (route) => ctx.webServer.register(route),
+    // 名字取自 sdk 域（ABI 的定义处）。显式类型参数是道保险：谁把那里退回硬编码字面量，
+    // 少了它就静默失败——`ctx.provide` 的 `(name: string, value?: any)` 重载会兜住任意字符串。
+    expose: {
+      provide: (service) =>
+        ctx.provide<typeof sdkApi.NOTIFIER_SERVICE>(sdkApi.NOTIFIER_SERVICE, service),
+    },
+    events: {
+      // 审批事件是 waterfall：本插件只旁观，转发之后必须 next()，漏掉就等于替所有人否决了
+      // 这次审批，症状是「审批不弹了」。prepend 让本监听器排在链前——前面的监听器不调
+      // next() 时，这次审批会对本插件彻底不可见。
+      onApprovalRequest: (handler) =>
+        ctx.on(
+          "approval/request",
+          (request, next) => {
+            guard(() => handler(request));
+            return next();
+          },
+          { global: true, prepend: true },
+        ),
+      // 与审批同构的第二个 waterfall：同样只旁观、同样必须把判定交还，漏 next() 的症状是
+      // 「提问不弹了」。
+      onUserQuestion: (handler) =>
+        ctx.on(
+          "user-questions/request",
+          (request, next) => {
+            guard(() => handler(request));
+            return next();
+          },
+          { global: true, prepend: true },
+        ),
+      onSessionEvent: (handler) =>
+        ctx.on(
+          "session/event",
+          (session, event) => {
+            guard(() => handler(session.id, event));
+          },
+          GLOBAL_LISTEN,
+        ),
+      // agent 四个事件把官方载荷**原样**转过去：拆成 id 等于替域决定「哪些字段有用」，
+      // 而那个决定正是 events 域该做的判断。
+      onAgentStatus: (handler) =>
+        ctx.on(
+          "agent/status",
+          (payload) => {
+            guard(() => handler(payload));
+          },
+          GLOBAL_LISTEN,
+        ),
+      onAgentDisposed: (handler) =>
+        ctx.on(
+          "agent/disposed",
+          (payload) => {
+            guard(() => handler(payload));
+          },
+          GLOBAL_LISTEN,
+        ),
+      onAgentTurnStopping: (handler) =>
+        ctx.on(
+          "agent/turn-stopping",
+          (payload) => {
+            guard(() => handler(payload));
+          },
+          GLOBAL_LISTEN,
+        ),
+      // 唯一的例外是错误原文：官方那边是宽类型，在这里做唯一一次收窄，域内不出现宽类型。
+      onAgentError: (handler) =>
+        ctx.on(
+          "agent/error",
+          (payload) => {
+            const failure = payload.error;
+            const reason = failure instanceof Error ? failure.message : String(failure);
+            guard(() => handler({ ...payload, error: reason }));
+          },
+          GLOBAL_LISTEN,
+        ),
+    },
+    // 宿主 agent 注册表：子代理归属判定的第二个信号。查不到与查得到分开报，怎么理解是域的事。
+    agents: {
+      lookup: (id) => {
+        const agent = ctx.get("agents", false)?.get(id);
+        return agent === undefined ? { found: false } : { found: true, agent };
+      },
+      isOwnedBy: (id, owner) => ctx.get("agents", false)?.isOwnedBy(id, owner) === true,
+    },
   };
 }
 
 /**
- * 挂载 dsh-notifier。
- * @param ctx 宿主插件上下文。
- * @param config 配置（enabled / configFile 迁移源 / toastScript 覆盖）。
+ * 装配：按依赖顺序接上各域，返回它们的释放函数。每步入参都来自上一步的产出或 `host`，
+ * 顺序错了就是运行期空值。
  */
-export function apply(ctx: Context, config: NotifierApplyConfig = {}): void {
-  const settingsBridge = createSettingsBridge(ctx, config);
-  const currentConfig = settingsBridge.getCurrent;
+function assemble(host: HostPort, config: NotifierApplyConfig): Array<() => void> {
+  const disposers: Array<() => void> = [];
 
-  const { toastScript, historyPath, statusPath, seqPath } = resolveStorePaths(config);
+  // 0. 存储与配置形态迁移：动的是磁盘（存储三个文件 + 配置文件），必须早于任何读文件的域。
+  //    存量配置由 settings 的显式依赖保证在装配期可读，所以整条链是同步的。
+  installUpgrade({ logger: host.logger, legacySettings: host.legacySettings });
+  disposers.push(releaseUpgrade);
 
-  // seq 计数器持久化（读写实现内聚在 server 域，装配层只解析路径 + 注入日志出口）；
-  // 语义与迁出前逐行等价：缺文件首启静默回退 0 / 损坏 warn + 回退 0 / 同步 tmp+rename
-  // 原子写（createSseHub 的 dispose 同步补写依赖此同步性）。
-  const seqStore = createSeqStore({ file: seqPath, warn: (message) => ctx.logger.warn(message) });
+  // 1. 设置：读面在装配返回时即可用，后续各域不必等加载。
+  configApi.installConfig({ logger: host.logger });
+  disposers.push(configApi.releaseConfig);
 
-  const sse = createSseHub({
-    getMaxConnections: () => currentConfig().maxConnections,
-    loadSeq: () => seqStore.load(),
-    saveSeq: (seq) => seqStore.save(seq),
+  // 2. 存储：保留天数由它自己按需读设置，不在这里替它取值。
+  storesApi.installStores({ logger: host.logger, config: configApi });
+  disposers.push(storesApi.releaseStores);
+
+  // 3. 裁决管线：递的是提供方的命名空间对象（消费方用 Pick 收窄），将来多用一样能力不用改这行。
+  pipelineApi.installPipeline({
+    enabled: config.enabled !== false,
+    frames: host.frames,
+    logger: host.logger,
+    config: configApi,
+    stores: storesApi,
+    channels: channelsApi,
   });
-  const system = createSystemNotifier({
-    toastScript,
-    warn: (message) => ctx.logger.warn(message),
-  });
-  const historyStore = createHistoryStore({
-    file: historyPath,
-    maxAgeDays: () => currentConfig().historyMaxAgeDays,
-    warn: (message) => ctx.logger.warn(message),
-  });
-  const statusStore = createStatusStore({
-    file: statusPath,
-    warn: (message) => ctx.logger.warn(message),
-  });
+  disposers.push(pipelineApi.releasePipeline);
 
-  const outboundChannels = createOutboundChannelResolver(() => currentConfig().channels);
-  const emitSent = createSentEmitter(ctx);
-
-  // 内置频道实例经装配层创建（实例只承载 id+capabilities 入投递池），
-  // 播放决议随裁决快照解析并经 DeliverDeps.play 值传递——browser→SSE 帧、
-  // system→system.notify（spec.pop/spec.sound；notify resolve false → throw →
-  // 终态 failed，对照落位前的 dispatchSystem 语义）。
-  const browserChannel = createBrowserChannel();
-  const systemChannel = createSystemChannel();
-
-  const notifierService: NotifierServiceInternal = createNotifierService({
-    current: currentConfig,
-    enabled: () => config.enabled !== false,
-    history: historyStore,
-    logger: ctx.logger,
-    outboundChannels,
-    builtinChannels: [
-      { id: BUILTIN_CHANNELS.browser, channel: browserChannel },
-      { id: BUILTIN_CHANNELS.system, channel: systemChannel },
-    ],
-    recordStatus: (channelId, status, error) => statusStore.record(channelId, status, error),
-    emitSent,
-    setConfirm: (kind, confirmed) => {
-      settingsBridge.confirmKindToConfig(kind, confirmed).catch((err) => {
-        ctx.logger.warn(`dsh-notifier: kind 确认写入失败 — ${errorMessage(err)}`);
-      });
-    },
-    play: (target: ResolvedTarget, payload: DeliverPayload) => {
-      if (target.id === BUILTIN_CHANNELS.browser) {
-        sse.broadcast(buildBrowserFrame(payload, target.dispatch as BrowserDispatchSpec));
-        return undefined;
-      }
-      const spec = target.dispatch as SystemDispatchSpec;
-      return system.notify(spec.pop, spec.sound, payload.title, payload.body).then((ok) => {
-        if (!ok) throw new Error("system notification failed (self-play or command error)");
-      });
-    },
+  // 4. 事件：请求一律产出，去留由裁决层决定——开关会在本域看不见的地方被改。
+  eventsApi.installEvents({
+    events: host.events,
+    agents: host.agents,
+    logger: host.logger,
+    pipeline: pipelineApi,
   });
+  disposers.push(eventsApi.releaseEvents);
 
-  // ctx.provide 的值类型由本文件的 declare module 合并约束（Context["wingsky.notifier"]
-  // = NotifierService，NotifierServiceInternal 是其子类型）；typeof 守卫保留，覆盖
-  // fake ctx / 旧宿主无 provide 的降级路径。
-  if (typeof ctx.provide === "function") {
-    ctx.provide("wingsky.notifier", notifierService);
+  // 5. 对外 ABI：服务面自己不依赖任何后装的域，但 api 域要读它的种类清单，故排在 api 之前。
+  sdkApi.installSdk({
+    expose: host.expose,
+    config: configApi,
+    pipeline: pipelineApi,
+  });
+  disposers.push(sdkApi.releaseSdk);
+
+  // 6. 浏览器出口：最后装——它读各域的现值，装早了页面第一次请求就会拿到半成品。
+  apiApi.installApi({
+    register: host.register,
+    frames: host.frames,
+    logger: host.logger,
+    config: configApi,
+    stores: storesApi,
+    pipeline: pipelineApi,
+    kinds: sdkApi,
+  });
+  disposers.push(apiApi.releaseApi);
+
+  return disposers;
+}
+
+/** 逐个释放；单个释放失败不阻断其余（否则一个域的清理会拖垮整条卸载链）。 */
+function safeDisposeAll(disposers: Array<() => void>): void {
+  // 逆序：后装的先释放，否则 api 域会在别人已放开的入参上继续服务。
+  for (const dispose of [...disposers].reverse()) {
+    try {
+      dispose();
+    } catch {
+      // 忽略：卸载阶段不做失败上报，避免掩盖首个异常
+    }
   }
-
-  function notify(kind: string, detail: NotifyDetail = {}): boolean {
-    const results = notifierService.sendKind(kind, detail);
-    return results.some((r) => r.status === "ok");
-  }
-
-  const doneBatcher: DoneBatcher = createDoneBatcher({
-    getWindowMs: () => currentConfig().doneMergeWindowMs,
-    notify,
-  });
-
-  const eventHandlers = createEventHandlers({
-    getConfig: currentConfig,
-    notify,
-    appendHistory: (entry) => historyStore.append(entry),
-    doneBatcher,
-    logger: ctx.logger,
-    // ctx.get("agents") 的类型来自 dsh-agent 的 Context 合并（AgentRegistry）；其
-    // get / isOwnedBy 是**方法声明**，按方法双变性可直接赋给本域窄读面
-    // SubagentOwnership（AgentRegistry 是更宽的实现面，收窄赋值成立）。
-    getAgents: () => (typeof ctx.get === "function" ? ctx.get("agents", false) : undefined),
-    // userQuestions 的官方包（@deepseek-ai/dsh-user-questions）不在 catalog：该键
-    // 未声明，`ctx.get(name: string, strict?)` 落到返回 any 的宽松重载，故此处保留
-    // 显式收窄到本域窄读面。事件化改造需 catalog 增包，属仓库级决策（#733 裁决点 2）。
-    getUserQuestionsService: () =>
-      typeof ctx.get === "function" ? (ctx.get("userQuestions", false) as { ask?: unknown } | undefined) : undefined,
-  });
-
-  eventHandlers.hookUserQuestions();
-
-  const disposers: Array<() => void> = [
-    ctx.on("approval/request", (req, next) => eventHandlers.handleApprovalRequest(req, next), { global: true, prepend: true }),
-    ctx.on("internal/service", (name) => eventHandlers.handleInternalService(name), { global: true }),
-    ctx.on("session/event", (session, event) => eventHandlers.handleSessionEvent(session, event), { global: true }),
-    ctx.on("agent/status", (payload) => eventHandlers.handleAgentStatus(payload), { global: true }),
-    ctx.on("agent/disposed", (payload) => eventHandlers.handleAgentDisposed(payload), { global: true }),
-    ctx.on("agent/error", (payload) => eventHandlers.handleAgentError(payload), { global: true }),
-    ctx.on("agent/turn-stopping", (payload) => eventHandlers.handleAgentTurnStopping(payload), { global: true }),
-  ];
-
-  const routes = buildRoutes({
-    // 配置域面全部走 ConfigPort 契约（settings-bridge 唯一实现；路由面
-    // 不再单独持 setConfirm，kinds 确认与 PUT 写面共用同一 CAS 语义）。
-    resolve: settingsBridge.resolve,
-    readUser: settingsBridge.readUser,
-    writable: settingsBridge.writable,
-    update: settingsBridge.update,
-    confirmKind: settingsBridge.confirmKind,
-    logger: ctx.logger,
-    sse,
-    system,
-    history: historyStore,
-    sendTest: (channelId?: string) =>
-      notifierService.sendKind("test", {}, { bypassQuiet: true, onlyChannel: channelId }),
-    statusReader: () => statusStore.read(),
-    listKinds: () => notifierService.listKinds(),
-  });
-
-  const disposeRoutes = ctx.effect(
-    () => {
-      const routeDisposers = routes.map((route) => ctx.webServer.register(route));
-      return () => safeDisposeAll(routeDisposers);
-    },
-    "dsh-notifier: routes",
-  );
-
-  ctx.effect(
-    () => () => {
-      sse.dispose();
-      eventHandlers.dispose();
-      doneBatcher.dispose();
-      safeDisposeAll(disposers);
-      disposeRoutes();
-    },
-    "dsh-notifier",
-  );
 }
