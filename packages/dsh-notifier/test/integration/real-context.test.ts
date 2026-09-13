@@ -213,10 +213,18 @@ function scopeRejecting<K extends keyof Events>(): ScopedThis<K> {
   return { [Context.filter]: () => false } as unknown as ScopedThis<K>;
 }
 
-/** 假 settings 服务：本插件只经 `describe({ redactSecrets })` 读 0.2.3 的存量命名空间。 */
-function fakeSettings(user: Record<string, unknown>): { describe: () => unknown[] } {
+/**
+ * 假 settings 服务：本插件读存量有**两条路**——provider 自报的宿主文档路径（`documentPath`）与已注册命名空间的服务面
+ * （`describe`）。`describe()` 在真实宿主里只列**已注册**的命名空间，所以这里的 `user` 用三种取值对应三种真实形态：
+ * `undefined` = 没注册这条命名空间（新架构的常态，服务面读不到）；`{}` = 注册了但 user 层为空；有键 = 注册且用户设过。
+ */
+function fakeSettings(
+  user: Record<string, unknown> | undefined,
+  documentPath?: string,
+): { describe: () => unknown[]; documentPath: string | undefined } {
   return {
-    describe: () => [{ ns: "dsh-notifier", user }],
+    describe: () => (user === undefined ? [] : [{ ns: "dsh-notifier", user }]),
+    documentPath,
   };
 }
 
@@ -293,10 +301,12 @@ let live: Fiber | null = null;
 async function mount(options: {
   config?: { enabled?: boolean };
   settings?: Record<string, unknown>;
+  /** 宿主文档路径：给了它就意味着 provider 是文件型，存量从该文件读（`settings` 缺省时服务面为空）。 */
+  settingsDocument?: string;
   services?: Record<string, unknown>;
 }): Promise<Mounted> {
   const root = new Context();
-  root.provide("settings", fakeSettings(options.settings ?? {}));
+  root.provide("settings", fakeSettings(options.settings, options.settingsDocument));
   for (const [name, value] of Object.entries(options.services ?? {})) root.provide(name, value);
   const warns = captureWarnings(root);
   const host = fakeWebServer(() => ({
@@ -353,6 +363,10 @@ beforeEach(() => {
   // 单例的落盘路径跨用例不变，能重置的只有文件：不重置的话上一个用例的配置/历史就是本用例的起点。
   rmSync(historyFile, { force: true });
   rmSync(configFile, { force: true });
+  // 宿主 settings 文档也落在这个共享的临时 DSH_HOME 里，而割接的兜底读路径正是这两个名字：上一个用例留下的
+  // 文档会被下一个用例当存量读走，它的服务面判据就此空转（实测：留下文档后，下一个用例读到的是文档）。
+  rmSync(join(home.dir, "settings.yaml"), { force: true });
+  rmSync(join(home.dir, "settings.json"), { force: true });
   seedSeqAnchor();
   seed(BASE_SETTINGS);
 });
@@ -831,6 +845,29 @@ describe("宿主 settings 服务：装配期同步割接存量配置", () => {
     ]);
     // 装配键（configFile）不进新配置：它在旧格式里就属于组合层的启动参数。
     expect("configFile" in stored).toBe(false);
+    await unmount();
+  });
+
+  it("命名空间未注册时也能割接：存量只在宿主文档里（服务面为空），直接读文件把它读出来", async () => {
+    rmSync(versionFile, { force: true });
+    rmSync(configFile, { force: true });
+    const document = join(home.dir, "settings.yaml");
+    writeFileSync(
+      document,
+      "dsh-notifier:\n  notifyTaskDone: false\n  notifySound: false\n",
+      "utf8",
+    );
+    // `settings` 缺省 = 服务面里没有这条命名空间（新架构不注册它）：只有文档那条路读得到存量。
+    const { unmount } = await mount({ settingsDocument: document });
+
+    const stored = JSON.parse(readFileSync(configFile, "utf8")) as Record<string, unknown>;
+    expect(stored.notifyTaskDone).toBe(false);
+    // 旧键搬完即删，且装配键不进新配置。
+    expect("notifySound" in stored).toBe(false);
+    expect(stored.channels).toEqual([
+      { type: "browser", id: "browser", sound: false },
+      { type: "system", id: "system", sound: false },
+    ]);
     await unmount();
   });
 
