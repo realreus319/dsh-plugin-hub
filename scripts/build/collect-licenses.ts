@@ -23,13 +23,67 @@
  *
  * 门禁：pack-check 对 tarball 断言「有内联 ⇒ THIRD-PARTY-LICENSES 存在、
  * 非空、含 MIT/BSD/Apache 字样且覆盖每个被内联的包名」（见 pack-check.ts）。
+ *
+ * vendored 裸二进制（批 2b）走**另一条证据源**：注释提取器看不见随包分发的
+ * `.exe/.node/.dll` 副本，故它们由 scripts/data/vendored-binaries.json 登记驱动并入
+ * （登记与哈希绑定由 gate/verify-vendored-binaries.mjs 断言）。两条证据源缺一，
+ * 「分发了一个副本却没附许可文本」就会静默成立。
  */
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { filterOutRetiredDirs, listPluginDirs, loadManifest } from "../lib/plugins-manifest-lib.ts";
+import { REGISTRY_REL, kindOf, vendoredEntriesFor } from "../lib/vendored-binaries-lib.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** 归集一段 vendored 许可所读的字段：缺哪个都会走到读不到路径/空许可头的分支。 */
+const VENDORED_LICENSE_FIELDS = ["path", "license", "source", "licenseFile"];
+
+/**
+ * 本包的 vendored 登记项。
+ *
+ * 登记表**缺失**时按空集处理：本函数的职责是「把该附的许可并进归集」，而「登记表必须在」
+ * 是门禁 verify-vendored-binaries 的判据（缺表即 exit 2）。在构建链里重复一份 fail-loud
+ * 只会把同一件事报两遍，还会让 fixture 仓库无法单独构建。表存在但非法则照抛——那是配置
+ * 错误，不是「本仓没用这个机制」。
+ *
+ * first-party 资产（本仓自有二进制）没有第三方许可文本可归集：把它并进第三方许可段等于给
+ * 自有的东西编一个「来源 + 许可证」，是错的信息，pack-check 的覆盖断言也无从满足。
+ */
+function vendoredFor(root, pkgDir) {
+  if (!existsSync(join(root, REGISTRY_REL))) return [];
+  const entries = vendoredEntriesFor(root, pkgDir).filter((e) => kindOf(e) !== "first-party");
+  for (const e of entries) {
+    const missing = VENDORED_LICENSE_FIELDS.filter(
+      (f) => typeof e?.[f] !== "string" || e[f].trim() === "",
+    );
+    if (missing.length > 0) {
+      // 门禁另有判据，但构建链是独立入口：不在这里显式拦，缺字段会以 `join(undefined)`
+      // 的 TypeError 或空许可头收场，报错文本指不到真正的原因。
+      throw new Error(
+        `vendored 登记项 ${e?.path ?? "无 path"} 字段缺失或非字符串：${missing.join(", ")}`,
+      );
+    }
+  }
+  return entries;
+}
+
+/**
+ * vendored 裸二进制归集段。头部写明 `path`：pack-check 对最终 tarball 的覆盖断言以它为
+ * 证据，改格式即改断言（两边同源）。
+ */
+function vendoredSection(root, entry) {
+  const licPath = join(root, entry.licenseFile);
+  if (!existsSync(licPath)) {
+    throw new Error(`登记表条目 ${entry.path} 的 license 文本不存在：${entry.licenseFile}`);
+  }
+  return (
+    `\n${"=".repeat(69)}\nvendored 二进制：${entry.path}\n` +
+    `${entry.license} — 来源：${entry.source}\n${"=".repeat(69)}\n\n` +
+    `${readFileSync(licPath, "utf8").trim()}\n`
+  );
+}
 
 /**
  * 从 esbuild 产物源码提取被内联的第三方模块引用（去重，按包名排序）。
@@ -183,7 +237,8 @@ export function collectForPackage(pkgDir, root = ROOT) {
   const libDir = join(absPkg, "lib");
   if (!existsSync(libDir)) throw new Error(`${pkgDir}: 缺 lib/（先构建再归集）`);
   const refs = inlinedRefsForLib(libDir);
-  if (refs.length === 0) return [];
+  const vendored = vendoredFor(root, pkgDir);
+  if (refs.length === 0 && vendored.length === 0) return [];
 
   const sections = [];
   for (const { name, pnpmSeg } of refs) {
@@ -225,18 +280,21 @@ export function collectForPackage(pkgDir, root = ROOT) {
     );
   }
 
+  for (const entry of vendored) sections.push(vendoredSection(root, entry));
+
   const out = [
     "THIRD-PARTY LICENSES",
     "===================",
     "",
-    `本发布物遵循「运行时依赖 = 构建期内联」模型，将下列第三方库打包进产物；`,
+    `本发布物遵循「运行时依赖 = 构建期内联」模型，将下列第三方库打包进产物`,
+    `（随包分发的 vendored 裸二进制单列一段并标出来源）；`,
     "依其许可证条款随附许可文本与版权声明。",
     `生成：scripts/collect-licenses.ts（issue #13）。本仓库自身以 MIT 许可发布。`,
     "",
     ...sections,
   ].join("\n");
   writeFileSync(join(libDir, "THIRD-PARTY-LICENSES"), out);
-  return refs.map((r) => r.name);
+  return [...refs.map((r) => r.name), ...vendored.map((e) => e.path)];
 }
 
 // ---- CLI 入口：无参数 = 全部插件包（按 manifest.retired 过滤，T1 防退役残留目录）----
