@@ -147,13 +147,14 @@ test("非 JSON 文件不参与扫描（只看 scripts/data 下的 .json）", () 
   }
 });
 
-test("本仓真实快照：8 条在册（数字变即提示同步台账与 #765）", () => {
-  // 8 = gate-exemptions.json 1（#762 客户端 var，临时）+ plugins-manifest 5（configSurfacesPending）
-  //     + coverage.config.json 1（`**/client/**` 排除，pending-project，等 happy-dom project，3.4 新增）
-  //     + gauntlet.config.json 1（crap.strict 观察期，仅解除条件、无到期日，#765 纳管）
+test("本仓真实快照：3 条在册（数字变即提示同步台账与 #765）", () => {
+  // 3 = gate-exemptions.json 1（#762 客户端 var，临时）+ coverage.config.json 1（**/client/** 排除，
+  //     pending-project，等 happy-dom project）+ gauntlet.config.json 1（crap.strict 观察期，仅解除
+  //     条件、无到期日，#765 纳管）。plugins-manifest 的 5 条 configSurfacesPending 已随 #774 全部
+  //     转为 configSurfaces 声明（含 2 条 surface: "none"），不再产生 reviewBy。
   const r = spawnSync(process.execPath, [SCRIPT], { cwd: ROOT, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /合计 8 条：已过期 0 /);
+  assert.match(r.stdout, /合计 3 条：已过期 0 /);
   assert.match(r.stdout, /仅解除条件（无到期日）1/);
   // crap.strict 的解除条件必须在台账里（只写日期会逼出「到期了再讨论一次」）
   assert.match(r.stdout, /\$\.crap {2}threshold=16/);
