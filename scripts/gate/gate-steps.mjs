@@ -60,7 +60,7 @@ export function tierSteps(tier, { hitPackages, withCoverage, base, scopeLabel })
     // （接线盲区）。迁成与兄弟闸同形的直接步骤后，两侧都可见：与 #733 3.1.2 把 module-state
     // 迁出 contract 的方向一致。
     {
-      label: "verify-dir-imports（目录门面：跨模块引用只走 interface.ts；3 包硬判）",
+      label: "verify-dir-imports（目录门面：跨模块引用只走 interface.ts；4 包硬判）",
       cmd: "node",
       args: [
         "scripts/gate/verify-dir-imports.mjs",
@@ -70,6 +70,8 @@ export function tierSteps(tier, { hitPackages, withCoverage, base, scopeLabel })
         "dsh-notifier",
         "--package",
         "dsh-lan-proxy",
+        "--package",
+        "dsh-worktree-sidebar",
       ],
     },
     {
