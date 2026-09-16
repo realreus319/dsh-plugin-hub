@@ -35,8 +35,9 @@ pnpm typecheck    # 全仓类型检查
 > `origin/main` 守护，面完整性由 `pnpm verify:coverage-scope` 守）；
 > **变异与 CRAP**在 `scripts/data/gauntlet.config.json`。
 >
-> **覆盖率口径（#722 阶段三）**：`pnpm cov` = vitest 的 istanbul provider，只跑
-> unit + integration（两者直连 `src/`）。分母是 `scripts/data/coverage.config.json` 的
+> **覆盖率口径（#722 阶段三 / #769 收窄）**：`pnpm cov` = vitest 的 istanbul provider，
+> 跑 unit + integration + client-unit + client-dom（四层都**直连 `src/`**）。分母是
+> `scripts/data/coverage.config.json` 的
 > `include`：`packages/*/src/**/*.{ts,tsx}` + `packages/*/src/**/*.mjs`（#733 3.4 补入的 3 个
 > 适配器实现，1756 行）+ `shared/**/*.js` 的**源文件**——零 vendor、零 lib 产物，且未加载的
 > 源文件按 0% 计入分母（分母不随「加载了什么」变化）。排除项是**结构化条目**（pattern +
@@ -45,11 +46,16 @@ pnpm typecheck    # 全仓类型检查
 > 产物）不进覆盖率，仍由 `pnpm test` 全量执行。阈值判分就是 `pnpm cov` 的退出码，
 > 不再有独立判分步骤；PR 的 `gate:full` 标签与 `observe.yml` 夜间班次共用这一执行点。
 >
-> **client 面暂排除在分母外**（`coverage.config.json` 里 `kind: pending-project` 的条目，
-> 带 `reviewBy` 与 `exitCriteria`，会进 `collect-exemptions` 的到期台账）：其直连 src 的测试
-> （happy-dom project）尚未落地，现有 `test/client/**` 是读 lib 产物的契约测试。计入分母会让
-> 这批恒 0% 的文件（规模见 `coverage.config.json` 的 `**/client/**` 条目）把全局值稀释约 22pp、阈值失去约束力，且 happy-dom project 落地时分子跳升、
-> 必须二次基线化。**待该 project 建立时移除排除项并一次性重新基线化。**
+> **client 面按包按面收窄（#769）**：此前是一条 `**/client/**` 整体排除，理由是「这些文件
+> 没有直连 src 的判据，计入分母只会稀释阈值」。那条理由对**一部分**文件成立、对另一部分不成立：
+> notifier 的 15 个纯 `.ts` 客户端模块里 12 个有直连判据（另有 2 个 DOM 面判据），它们计入分母
+> 后实测全局 lines 82.48 → 81.76、functions 83.17 → 81.99，四项仍在阈值之上。故拆成 5 条
+> `pending-project` 条目：notifier 只排除 `.tsx` 渲染面（等组件级渲染判据），另外 3 个包
+> 各自的整个 client 面仍排除（尚未重写、没有直连判据），`shared/client/**` 排除（其测试在
+> `scripts/test` 下、不属于任何 vitest project）；#840 退役 dsh-web-file-preview 后它那条随之删除。
+> 全部带 `reviewBy` 与 `exitCriteria`，进 `collect-exemptions` 的到期台账；条目腐烂由
+> `verify:coverage-scope` 判红。
+> **某个包的客户端有了直连判据就删掉它自己那一条——不要等「全部重写完」再一次性解绑。**
 >
 > **`pnpm crap` 现状（#722 阶段五已重建为 src 口径）**：圈复杂度取 ESLint 内置
 > `complexity` 规则，覆盖率取同一份 src 口径产物（`coverage/coverage-final.json`），
@@ -292,8 +298,10 @@ SessionHeader.origin / Agent.session），并同步根 README「版本适配」�
   `node scripts/gate/aggregate.ts` 重新生成聚合 patch。
 - **测试**：`pnpm test` 直跑（包内实现为 `node ../../scripts/test/run-vitest.mjs --min <N>`）。
   运行器由 vitest 承载：根 `vitest.config.ts` 从 `scripts/data/mutation-topology.json` 的
-  `$testLayers.layers` 派生四个 project（`test/unit` → `unit`、
-  `test/integration` → `integration`、`test/e2e` → `e2e`、`test/client` → `contract`；
+  `$testLayers.layers` 派生六个 project（`test/unit` → `unit`、
+  `test/integration` → `integration`、`test/client-unit` → `client-unit`（直连 src 的客户端
+  纯逻辑判据）、`test/client-dom` → `client-dom`（happy-dom 环境，直连 src 的 DOM 单测）、
+  `test/client` → `contract`、`test/e2e` → `e2e`；
   层 glob 与 `--min` 口径因此同源，不再三处声明），
   每个测试文件独立环境（per-file 隔离），包级调用按 cwd 自动收窄到本包；
   乱序验证用 `--sequence.shuffle` 透传。
@@ -312,11 +320,14 @@ SessionHeader.origin / Agent.session），并同步根 README「版本适配」�
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
 | `test/unit/**`        | 单模块 / 纯逻辑 / fake 驱动、只做临时目录 I/O（允许为覆盖分支而短暂 bind 一个端口，如 lan-proxy 的 EADDRINUSE 用例）                                | 是       |
 | `test/integration/**` | 以真实 socket/真实组合根为被测对象：起真实 http server（内核临时端口）走完整转发链、真实 cordis Context、真实配置迁移                               | 是       |
-| `test/client/**`      | 断言对象是客户端**构建产物** `lib/client.js`——而 `mutate` 面本身排除 `src/client/**`，登记进变异面测试清单只增加每个段的 dry run 成本、杀灭贡献为零 | 否       |
+| `test/client-unit/**` | 直连 `src/client/**` 的**纯逻辑**判据（判定、映射表、状态机），不需要 DOM；环境 `node`                                                                  | 是       |
+| `test/client-dom/**`  | 直连 `src/client/**` 但被测模块在**加载期或运行期真的读写 DOM**（`document.title`、横幅挂载），必须 `happy-dom`；文件头用 `@vitest-environment happy-dom` 声明（派生配置是单 project `node`，不吃根配置的层环境） | 是       |
+| `test/client/**`      | 断言对象是客户端**构建产物**形态（`lib/client.js`、或 in-place esbuild 后执行已构建副本）——产物外壳无法用 perTest 覆盖分析归因到任何 `src/**` 模块，登记进变异面只增加每个段的 dry run 成本、杀灭贡献为零；直连 src 的判据在 `client-unit` / `client-dom` | 否       |
 | `test/e2e/**`         | 真实监听端口 / spawn 子进程 / 真机系统调用的大 smoke                                                                                                | 否       |
 
-支撑模块不入任何层：`test/helpers.ts`、`test/smoke-lib.ts`、`test/smoke-pure.ts`、
-`test/*.worker.mjs`（它们不是测试条目）。**判层按机制而非文件名**：notifier 的
+支撑模块不入任何层：`test/helpers.ts`、`test/client-helpers.ts`（客户端判据共用的替身，只服务
+一个域故不上提包级夹具）、`test/smoke-lib.ts`、`test/smoke-pure.ts`、`test/*.worker.mjs`
+（它们不是测试条目）。**判层按机制而非文件名**：notifier 的
 `e2e-*.test.ts` 用的是 in-process cordis Context + fake 驱动（不 listen、不 spawn），
 故归集成层并保留在变异面；反之 `smoke.test.ts`（真实端口/子进程）归 e2e 层。
 
@@ -451,6 +462,14 @@ export const inject: string[] = []; // 声明 apply 用到的 ctx 服务（如 [
   `style.css`、`react-shim.d.ts`、`css.d.ts` 都归位 `src/client/`；宿主模块留 `src/` 根。
 - **宿主 & 客户端共享**的模块（如双端共用的后缀表 / 契约常量）留 `src/` 根，
   客户端经 `../grouping.js` 引用——不要为"客户端专用"而把共享模块搬走。
+- **例外：包内 `src/shared/**`（#769 起）**。双端共享且要求**零 import**（或只做同目录
+  `.ts` 相对 import）才能两端各自 inline 的模块（典型是契约常量表与种类表）归位
+  `src/shared/`，两端都经 `src/shared/interface.ts` 这一处门面引用（目录头写明约束，
+  见 `packages/dsh-notifier/src/shared/interface.ts`）。放进这个目录的意义不是分类而是
+  **可审**：`scripts/test/shared-leaf-imports.test.ts` 按「客户端是否经门面消费」推导扫描面，
+  对门面转出链上的每个叶子模块机械判红（值引 `node:*` 会构建失败、值引 bare 包会**静默内联**
+  进浏览器产物）。该目录的最终形态（包内 `src/shared/` 还是独立 shard 目录）由 #792 的三档
+  共享规范裁定。
 
 ### 2.3 客户端其它要点
 

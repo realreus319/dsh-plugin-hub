@@ -5,7 +5,7 @@
     "dsh-lan-proxy": {
       "modules": 0,
       "scannedSrcFiles": 8,
-      "allSrcTsFiles": 13,
+      "allSrcTsFiles": 12,
       "interfaceFacades": 0,
       "leafValueEdges": 0,
       "fileValueEdges": 17,
@@ -22,11 +22,11 @@
     "dsh-mcp-manager": {
       "modules": 14,
       "scannedSrcFiles": 63,
-      "allSrcTsFiles": 78,
+      "allSrcTsFiles": 77,
       "interfaceFacades": 14,
       "leafValueEdges": 33,
-      "fileValueEdges": 116,
-      "crossModuleRefs": 134,
+      "fileValueEdges": 115,
+      "crossModuleRefs": 131,
       "quality": {
         "leafModuleCycles": [
           "catalog|config/model|connection|connection/orchestrator",
@@ -50,12 +50,12 @@
     },
     "dsh-notifier": {
       "modules": 10,
-      "scannedSrcFiles": 99,
-      "allSrcTsFiles": 105,
+      "scannedSrcFiles": 107,
+      "allSrcTsFiles": 136,
       "interfaceFacades": 10,
-      "leafValueEdges": 7,
-      "fileValueEdges": 103,
-      "crossModuleRefs": 89,
+      "leafValueEdges": 11,
+      "fileValueEdges": 118,
+      "crossModuleRefs": 105,
       "quality": {
         "leafModuleCycles": [],
         "fileCycles": [],
@@ -68,7 +68,7 @@
     "dsh-provider-usage": {
       "modules": 13,
       "scannedSrcFiles": 59,
-      "allSrcTsFiles": 75,
+      "allSrcTsFiles": 74,
       "interfaceFacades": 13,
       "leafValueEdges": 35,
       "fileValueEdges": 123,
