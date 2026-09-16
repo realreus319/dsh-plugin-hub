@@ -3,13 +3,13 @@
   "version": 2,
   "packages": {
     "dsh-lan-proxy": {
-      "modules": 0,
-      "scannedSrcFiles": 8,
-      "allSrcTsFiles": 12,
-      "interfaceFacades": 0,
-      "leafValueEdges": 0,
-      "fileValueEdges": 17,
-      "crossModuleRefs": 0,
+      "modules": 5,
+      "scannedSrcFiles": 16,
+      "allSrcTsFiles": 22,
+      "interfaceFacades": 5,
+      "leafValueEdges": 3,
+      "fileValueEdges": 25,
+      "crossModuleRefs": 34,
       "quality": {
         "leafModuleCycles": [],
         "fileCycles": [],
@@ -87,6 +87,23 @@
         "directImpl": [
           "apply/report-config-service.ts|domain2/schedule/config.ts"
         ],
+        "uncoveredSrcFiles": []
+      }
+    },
+    "dsh-worktree-sidebar": {
+      "modules": 7,
+      "scannedSrcFiles": 41,
+      "allSrcTsFiles": 47,
+      "interfaceFacades": 7,
+      "leafValueEdges": 2,
+      "fileValueEdges": 46,
+      "crossModuleRefs": 34,
+      "quality": {
+        "leafModuleCycles": [],
+        "fileCycles": [],
+        "implToOtherImpl": [],
+        "missingInterface": [],
+        "directImpl": [],
         "uncoveredSrcFiles": []
       }
     },

@@ -129,6 +129,8 @@
 - `data/dsh-lan-proxy-ui-exempt.json` — lan-proxy 客户端 UI 豁免表（#733 计划项 3.2.2）：哪些配置键有值但 GUI 不渲染，逐键给原因；条目数上限是**策略**，留在门禁代码里。
 - `data/dsh-notifier-export-surface.json` — dsh-notifier 的导出面清单（消费者可见的类型/值面）：被包内 `consumer-types` 集成测试消费，该测试在 `vitest.stryker.d/dsh-notifier.config.ts` 的变异面 include 内。
 - `data/dsh-notifier-export-faces.json` — dsh-notifier 的导出面准入清单：被常驻的 `test/export-faces-admission.test.ts` 消费（改这两个文件会命中 dsh-notifier 面，见 `data/ci-face-registry.json`）。
+- `data/dsh-lan-proxy-export-surface.json` — dsh-lan-proxy 的导出面清单（#826 冻结：「目录重排零行为变更」由人工一次性比对升级为可重复判据）：被 `gate/export-surface-snapshot.mjs --package dsh-lan-proxy` 逐字节比对，执行点见 ci.yml 的 Export surface snapshot 步骤。
+- `data/dsh-lan-proxy-export-faces.json` — dsh-lan-proxy 的导出面准入清单：与基线同一次 `emitDeclarations()` 产物喂「新增导出必须显式分类」判据；与上面的导出面清单必须同批更新，改这两个文件会命中 dsh-lan-proxy 面（见 `data/ci-face-registry.json`）。
 - `data/ci-face-registry.json` — `packages/` 之外每个 tracked 文件的 CI 归属登记（#742 阶段 2.3）：`faces`（`global` / 包名 / 空数组=显式豁免）+ `why`；`test/ci-face-coverage.test.ts` 用真实 `git ls-files` 与 ci.yml 的 filters 双向核对（未登记、悬空条目、面未接上、死 glob 四类都判红）。
 
 - `data/threshold-registry.json` — 阈值事实源的**声明表**（#843 D5）：`kind` = value（数字标量，`weaken` 指明哪个方向是放宽）/ boolean（开关，`weakenValue` = 等于它就等于放宽）/ baseline（逐包回落锚点，`anchorFields` 是回退链，读法与 `gate/observe-check.mjs` 的 `fixedCovered ?? baselineCovered` 一致）/ existence（集合存在性，`universe` 从 `packages/` 目录派生、`exemptFrom` 读 `mutation-topology.json` 的 `$noMutationPackages`）；`notAGate[]` 逐条说明「为什么它不是阈值事实源」。未登记的数据文件、幽灵声明、幽灵判据三类都判红；`kind=existence` 的豁免登记在 `data/gate-exemptions.json`（gate=`threshold-registry`），**按判据分开**：path=`<guard.path>.<包名>#membership` 只豁免「包在表里」、`#anchor` 只豁免「有回落锚点」，value 守卫的删键用 `<被移除的叶子路径>#removal`；认不出的键与已无缺口的键都判红（反向腐烂）。

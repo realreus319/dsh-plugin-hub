@@ -33,20 +33,27 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const NOTIFIER_CONFIG_DIR = "packages/dsh-notifier/src/server/config";
 const NOTIFIER_SHARED_DIR = "packages/dsh-notifier/src/shared";
 
-/** mkdtemp 副本仓库：复制矩阵的输入面（lan-proxy 平铺 config.ts；notifier 整个配置域）
+/** mkdtemp 副本仓库：复制矩阵的输入面（lan-proxy 配置域入口 model.ts；notifier 整个配置域）
  *  加上声明文件与 package.json。 */
 function fakeRepo() {
   const root = mkdtempSync(join(tmpdir(), "cfgmtx-"));
   try {
-    mkdirSync(join(root, "packages", "dsh-lan-proxy", "src", "client"), { recursive: true });
+    mkdirSync(join(root, "packages", "dsh-lan-proxy", "src", "client", "shared"), {
+      recursive: true,
+    });
+    mkdirSync(join(root, "packages", "dsh-lan-proxy", "src", "server", "config", "impl"), {
+      recursive: true,
+    });
     mkdirSync(join(root, "scripts", "data"), { recursive: true });
+    // 矩阵只读这一份配置域入口文本（Config / FILE_CONFIG_VALIDATORS / SETTING_FIELD_HINTS
+    // 同居其中，见 config-matrix-gate 的 runLanProxy），故不必复制整个 server 树。
     copyLf(
-      join(ROOT, "packages/dsh-lan-proxy/src/config.ts"),
-      join(root, "packages/dsh-lan-proxy/src/config.ts"),
+      join(ROOT, "packages/dsh-lan-proxy/src/server/config/impl/model.ts"),
+      join(root, "packages/dsh-lan-proxy/src/server/config/impl/model.ts"),
     );
     copyLf(
-      join(ROOT, "packages/dsh-lan-proxy/src/client/index.ts"),
-      join(root, "packages/dsh-lan-proxy/src/client/index.ts"),
+      join(ROOT, "packages/dsh-lan-proxy/src/client/shared/defaults.ts"),
+      join(root, "packages/dsh-lan-proxy/src/client/shared/defaults.ts"),
     );
     // 配置域整棵复制：运行时 require 要走完整 import 链（impl/input → ../model → ../../../../shared）。
     cpSync(join(ROOT, NOTIFIER_CONFIG_DIR), join(root, NOTIFIER_CONFIG_DIR), { recursive: true });
@@ -148,7 +155,7 @@ test("lan-proxy: 删 FILE_CONFIG_VALIDATORS 一键 → 红且报错含键名", (
   assertRed(
     "lan-proxy 删 validators.enabled",
     (root) => {
-      edit(root, "dsh-lan-proxy", "config.ts", (s) =>
+      edit(root, "dsh-lan-proxy", "server/config/impl/model.ts", (s) =>
         s.replace(/  enabled: \(v\) => typeof v === "boolean",\n/, ""),
       );
     },
@@ -160,7 +167,7 @@ test("lan-proxy: DEFAULTS 增 schema 外键 → 红且报错含键名", () => {
   assertRed(
     "lan-proxy DEFAULTS 加 fakeKey",
     (root) => {
-      edit(root, "dsh-lan-proxy", "client/index.ts", (s) =>
+      edit(root, "dsh-lan-proxy", "client/shared/defaults.ts", (s) =>
         // 锚点只锁声明本身：缩进归 Prettier（顶层块的多余缩进会被归一化），
         // 注入行自带格式化器口径的缩进，避免判据绑死在某一版排版上。
         s.replace(/const DEFAULTS: Record<string, any> = \{\n/, "$&  fakeKey: 1,\n"),
@@ -174,7 +181,7 @@ test("lan-proxy: 删 Config schema 键 → 红且报错含键名", () => {
   assertRed(
     "lan-proxy 删 schema.host",
     (root) => {
-      edit(root, "dsh-lan-proxy", "config.ts", (s) =>
+      edit(root, "dsh-lan-proxy", "server/config/impl/model.ts", (s) =>
         s.replace(/  host: z\.string\(\)\.default\(DEFAULT_OPTIONS\.host\),\n/, ""),
       );
     },
@@ -186,7 +193,7 @@ test("lan-proxy: DEFAULTS 删非豁免可编辑键 → 红且报错含键名", (
   assertRed(
     "lan-proxy DEFAULTS 删 tlsCertFile",
     (root) => {
-      edit(root, "dsh-lan-proxy", "client/index.ts", (s) =>
+      edit(root, "dsh-lan-proxy", "client/shared/defaults.ts", (s) =>
         // 缩进与引号形态均归 Prettier，判据只锁「这一行存在」，不锁它怎么排的
         s.replace(/^[ \t]*tlsCertFile: (?:""|''),\n/m, ""),
       );
@@ -411,7 +418,7 @@ test("UI 豁免表: 条目超上限（>8）→ 红（上限是策略，数据面
         for (let i = 0; i < 5; i++) {
           json.exemptKeys.push({
             key: `extra${i}`,
-            reason: "packages/dsh-lan-proxy/src/config.ts:1 注入用例",
+            reason: "packages/dsh-lan-proxy/src/server/config/impl/model.ts:1 注入用例",
           });
         }
         return `${JSON.stringify(json, null, 2)}\n`;
@@ -453,7 +460,7 @@ test("UI 豁免表: 豁免键已出现在客户端 DEFAULTS → 红（豁免残�
   assertRed(
     "客户端 DEFAULTS 补上 host",
     (root) => {
-      edit(root, "dsh-lan-proxy", "client/index.ts", (s) => {
+      edit(root, "dsh-lan-proxy", "client/shared/defaults.ts", (s) => {
         const after = s.replace(/^(\s*)enabled: true,$/m, '$1enabled: true,\n$1host: "127.0.0.1",');
         assert.notEqual(after, s, "fixture 应含 `enabled: true,`（源码改动后请同步本注入）");
         return after;
@@ -491,6 +498,85 @@ test("量级: README 配置表缺键 → warn 不红（pass 仍 true）", () => 
       `warn 应含键名 enabled: ${r.warnings.join(";")}`,
     );
     assert.ok(r.problems.length === 0, "README 缺键不应产生 problems");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---- 豁免锚点判据（#826）：新增的机器判据自己也要能被一次实现改动打红 ----
+
+test("UI 豁免表: 锚点指向错误的行 → 红并点名键（#826 新增判据的负向 fixture）", () => {
+  assertRed(
+    "把 host 的锚点指到 Config 声明行（87）而不是定义行（91）",
+    (root) => {
+      editData(root, "dsh-lan-proxy-ui-exempt.json", (s) => {
+        const after = s
+          .split("server/config/impl/model.ts:91")
+          .join("server/config/impl/model.ts:87");
+        assert.notEqual(after, s, "fixture 应含 model.ts:91");
+        return after;
+      });
+    },
+    ["锚点", "指错", "host"],
+  );
+});
+
+test("UI 豁免表: 锚点指向别的文件 → 红（不能靠换路径躲开核验）", () => {
+  assertRed(
+    "把 host 的锚点路径换成 client/shared/defaults.ts（reason 与 rationale 两处）",
+    (root) => {
+      editData(root, "dsh-lan-proxy-ui-exempt.json", (s) => {
+        // 两处都要换：只换一处时另一处仍是合法锚点，判据本就不该报「未指向」。
+        const after = s.split("model.ts:91").join("defaults.ts:91");
+        assert.notEqual(after, s, "fixture 应含 model.ts:91");
+        return after;
+      });
+    },
+    ["未指向 Config 表所在文件"],
+  );
+});
+
+test("UI 豁免表: 锚点写法变体（./ 前缀 / 区间）仍应通过——判据不得被写法差异误伤", () => {
+  const root = fakeRepo();
+  try {
+    editData(root, "dsh-lan-proxy-ui-exempt.json", (s) => {
+      const json = JSON.parse(s);
+      const host = json.exemptKeys.find((e) => e.key === "host");
+      const targetHost = json.exemptKeys.find((e) => e.key === "targetHost");
+      const before = JSON.stringify([
+        host.reason,
+        host.rationale,
+        targetHost.reason,
+        targetHost.rationale,
+      ]);
+      // **reason 与 rationale 都要改**：判据把两段文本合起来找锚点，只要任一字段还留着普通
+      // 路径锚点，这条用例对 `./` 归一子句就是空钉（实测：删掉归一的副本下本用例仍绿）。
+      // 区间把上方注释一起括进来，也是人写锚点的自然形态。
+      host.reason = host.reason.replace(
+        "packages/dsh-lan-proxy/src/server/config/impl/model.ts:91",
+        "./packages/dsh-lan-proxy/src/server/config/impl/model.ts:88-95",
+      );
+      host.rationale = host.rationale.replace(
+        "server/config/impl/model.ts:91",
+        "./server/config/impl/model.ts:88-95",
+      );
+      targetHost.reason = targetHost.reason.replace(
+        "packages/dsh-lan-proxy/src/server/config/impl/model.ts:107",
+        "./packages/dsh-lan-proxy/src/server/config/impl/model.ts:107",
+      );
+      targetHost.rationale = targetHost.rationale.replace(
+        "server/config/impl/model.ts:107",
+        "./server/config/impl/model.ts:107",
+      );
+      assert.notEqual(
+        JSON.stringify([host.reason, host.rationale, targetHost.reason, targetHost.rationale]),
+        before,
+        "fixture 未改写任何锚点——真值文本漂移了，请同步本注入",
+      );
+      return `${JSON.stringify(json, null, 2)}\n`;
+    });
+    const r = runConfigMatrix(root);
+    assert.equal(r.pass, true, `写法变体不应判红。实际 problems: ${r.problems.join("; ")}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

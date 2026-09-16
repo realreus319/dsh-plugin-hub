@@ -11,25 +11,9 @@
 
 import * as React from "react";
 import { t } from "../../../../shared/client/i18n.js";
+import { DEFAULTS as CLIENT_DEFAULTS } from "./shared/interface.ts";
 
 const CONFIG_ROUTE = "/api/dsh-lan-proxy/config";
-
-/** 展示缺省值（与宿主 DEFAULT_OPTIONS 同构；用户层未保存的键回落这些值）。 */
-export const DEFAULT_SETTINGS: Record<string, any> = {
-  enabled: true,
-  port: 3081,
-  httpsEnabled: true,
-  httpsPort: 3443,
-  tlsCertFile: "",
-  tlsKeyFile: "",
-  printBanner: true,
-  wsBridgeEnabled: true,
-  wsCompressEnabled: true,
-  wsCompressPaths: ["/api/remote.mux"],
-  httpCompressEnabled: true,
-  httpCompressLevel: 1,
-  injectToken: true,
-};
 
 /** 增量 diff 的键值比较：路径白名单数组按元素逐一比较，其余严格相等。 */
 function sameSetting(key: string, a: any, b: any): boolean {
@@ -55,21 +39,22 @@ function compressStatusLine(c: any): string | null {
 }
 
 /**
+ * settings.plugin.item 插槽的 props。形参本身不可写成可选（`props?`）：可选参数会让
+ * 组件 props 泛型带上 undefined，React.createElement 的类型校验随之失配（TS2769），
+ * 只能靠宽化断言消音。
+ */
+export interface SettingsCardProps {
+  /** 调用方注入的宿主端默认值快照。 */
+  defaults?: Record<string, any>;
+}
+
+/**
  * 设置面板插件项：启用 / LAN 端口 / HTTPS / 证书文件 / 启动横幅。
  * 改动只在点「保存」后生效：经 loopback HTTP 路由写入官方 settings 存储，
  * 宿主 scope.watch 立即重建转发器。
  */
-/**
- * settings.plugin.item 插槽注册时由调用方注入的宿主端默认值快照。
- * 形参不可写成可选（`props?`）：可选参数会让组件 props 泛型带上 undefined，
- * React.createElement 的类型校验随之失配（TS2769），只能靠宽化断言消音。
- */
-export interface SettingsCardProps {
-  defaults?: Record<string, any>;
-}
-
 export function SettingsCard(props: SettingsCardProps) {
-  const DEFAULTS = props.defaults || DEFAULT_SETTINGS;
+  const DEFAULTS = props.defaults || CLIENT_DEFAULTS;
   const useState = React.useState;
   const useEffect = React.useEffect;
   // 显式声明状态形状：useState(null) 会把状态推成字面 null，写入任何非 null 值都编不过。

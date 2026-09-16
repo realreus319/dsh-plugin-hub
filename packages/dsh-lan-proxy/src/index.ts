@@ -27,10 +27,10 @@
  * `webServer`，因此只在回环服务器监听后启动，并从 ctx.webServer.port
  * 解析真实上游端口（`--port 0` 与自定义 `--port` 均可用）。
  *
- * 结构（#276 方案 A 阶段 3 拆分）：职责按模块拆分（config / settings /
- * migrate / config-routes / apply），本文件保留插件契约（name/inject 与 apply、
- * 路由表转发）与全部公共符号 re-export（导出面不变，外部消费者从
- * lib/index.js 导入不受影响）。apply 实现于 apply.ts，不 import 本文件。
+ * 结构（#826 域归位）：实现按域归位到 src/server/<域>/（config / migrate / proxy / tls）
+ * 与 src/server/shared/（包内共享叶子），装配在 src/server/apply.ts；本文件保留插件契约
+ * （name/inject 与 apply、路由表转发）与全部公共符号 re-export（导出面不变，外部消费者从
+ * lib/index.js 导入不受影响）。apply 实现于 server/apply.ts，不 import 本文件。
  */
 export const name = "lan-proxy";
 
@@ -47,44 +47,46 @@ export {
   sanitizeSettings,
   validateSettings,
   normalizeLegacyWsCompressPaths,
-} from "./config.ts";
+} from "./server/config/interface.ts";
 export type {
   HttpCompressSnapshot,
   LanProxyConfig,
   ResolvedConfig,
   SettingInvalid,
-} from "./config.ts";
-// 官方 settings 命名空间接线（#276 方案 A 阶段 3 拆出）
-export { SETTINGS_NS, installLanProxySettings } from "./settings.ts";
-export type { LanProxySettingsHooks, OwnerScopeLike } from "./settings.ts";
-// 存量 config.json 一次性迁移（#276 方案 A 阶段 3 拆出）
-export { MIGRATED_BAK_NAME, migrateFileConfig } from "./migrate.ts";
-export type { MigrationOutcome } from "./migrate.ts";
-// loopback HTTP 配置路由（#276 方案 A 阶段 3 拆出：路由表 + 保存纯函数）
-export { ROUTES, applyConfigPatch, buildConfigRoutes } from "./config-routes.ts";
-export type { ConfigRouteDeps, PatchResult } from "./config-routes.ts";
-// 插件挂载主流程（apply + 转发常量）
-export { apply, pluginDir, DEFAULT_WSS_COMPRESS_PATHS } from "./apply.ts";
+} from "./server/config/interface.ts";
+export { SETTINGS_NS, installLanProxySettings } from "./server/config/interface.ts";
+export type { LanProxySettingsHooks, OwnerScopeLike } from "./server/config/interface.ts";
+export { ROUTES, applyConfigPatch, buildConfigRoutes } from "./server/config/interface.ts";
+export type { ConfigRouteDeps, PatchResult } from "./server/config/interface.ts";
+export { MIGRATED_BAK_NAME, migrateFileConfig } from "./server/migrate/interface.ts";
+export type { MigrationOutcome } from "./server/migrate/interface.ts";
+export { apply, pluginDir, DEFAULT_WSS_COMPRESS_PATHS } from "./server/apply.ts";
 
-// 测试面 re-export（smoke 只依赖主入口，避免发布物保留内部模块）
+// 既有包导出面（历史 ABI，冻结）：下列内部符号自 #276 拆分起就随 lib/index.js 发布，
+// 收窄属公共 API 变更（红线，需独立 PR 走导出面评审）；不得以「测试需要」为由继续追加。
 export {
   createLanProxy,
   hostnameAllowed,
   formatAuthority,
   rewriteHeaders,
   bridgeUpstreamHeaders,
-  isLoopbackTarget,
-  DEFAULT_OPTIONS,
   compressWsPath,
   isCompressible,
   resolveCompressionOptions,
   deflateAllowedByPolicy,
-  DEFAULT_DEFLATE_POLICY,
   hasDshAuthCookie,
   isTokenMintCandidate,
   withLaunchToken,
-} from "./proxy.ts";
-export type { ConnStats, DeflatePolicy, LanProxy, TokenProvider } from "./proxy.ts";
+} from "./server/proxy/interface.ts";
+export type { ConnStats, LanProxy, TokenProvider } from "./server/proxy/interface.ts";
+// 包内共享叶子（#826：默认值常量与回环判定从 proxy.ts 归位）
+export {
+  DEFAULT_DEFLATE_POLICY,
+  DEFAULT_OPTIONS,
+  isLoopbackTarget,
+} from "./server/shared/interface.ts";
+export type { DeflatePolicy } from "./server/shared/interface.ts";
+// TLS 域（#826：cert.ts 归位为 server/tls/）
 export {
   ensureSelfSignedTls,
   certStillValid,
@@ -92,4 +94,4 @@ export {
   loadTlsFromFiles,
   SELF_SIGNED_KEY,
   SELF_SIGNED_CERT,
-} from "./cert.ts";
+} from "./server/tls/interface.ts";

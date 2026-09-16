@@ -112,8 +112,8 @@ release.yml tag 管线跑全量门禁——全量只在这三处语义中的后�
      组 A（廉价全仓闸，恒跑）：判定脚本 `repo-gate-assert.mjs`、`threshold-monotonic`、
      `aggregate:check`、`stryker:check`、`test:scripts`、`forbid-src-tests`、
      `forbid-homedir-src`、`forbid-module-state-src`、`verify-scripts-index`、
-     `verify-coverage-scope`、`verify:vendored-binaries`、`verify-dir-imports`（3 包硬判
-     + provider-usage `--soft`）、`export-surface-snapshot`（dsh-notifier）、
+     `verify-coverage-scope`、`verify:vendored-binaries`、`verify-dir-imports`（4 包硬判
+     + provider-usage `--soft`）、`export-surface-snapshot`（dsh-notifier + dsh-lan-proxy）、
      `verify-shared-fanin`、`docs:check`、`lint`、`format:check`
      （本清单是导读，**事实源是 ci.yml 的 repo-gate 步骤本身**。接线由
      `scripts/test/gate-wiring.test.ts` 两族断言守护，缺一不可：**一致性**——「本地档位计划 ↔
@@ -456,7 +456,7 @@ export const inject: string[] = []; // 声明 apply 用到的 ctx 服务（如 [
 | 路径                | 触发                                      | 说明                                                                                                                                                                                                                             |
 | ------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 纯净 wrapper        | 干净模块、无 bare import                  | esbuild iife + 生成契约外壳；`apply/inject` 直出                                                                                                                                                                                 |
-| wrapper + externals | 干净模块 `import * as React from "react"` | 干净模块 cjs 内联进 `factory(require)`，React 由 loader 的 `require("react")` 注入（dsh web **无全局 React**）。需同目录 `react-shim.d.ts`（`declare module "react"`，不引 @types/react），`peerDependencies.react` + `optional` |
+| wrapper + externals | 干净模块 `import * as React from "react"` | 干净模块 cjs 内联进 `factory(require)`，React 由 loader 的 `require("react")` 注入（dsh web **无全局 React**）。**类型**由仓库根 devDep `@types/react` 解析（#834 起各包不再自备 `react-shim.d.ts`，那份 ambient 声明已删），运行时仍是 loader 注入，故只声明 `peerDependencies.react` + `optional` |
 | 第三方内联          | `dsh.client.inlineBareImports: true`      | 干净模块的 bare import（dompurify/diff2html/marked/highlight…）由 esbuild **内联进 client.js**，产物仍自包含。用于纯浏览器第三方库、无宿主注入 JS 模块的场景                                                                     |
 
 > ⚠️ **互斥**：默认「bare import = 宿主注入 external（React）」；`inlineBareImports: true`
@@ -465,8 +465,9 @@ export const inject: string[] = []; // 声明 apply 用到的 ctx 服务（如 [
 ### 2.2 目录约定
 
 - 客户端入口统一 `src/client/index.ts`（`src/client.ts` 已停用）。
-- **拆 CSS 或带多模块/React shim 的包**：客户端专属模块（`md/code/renderer` 等）、
-  `style.css`、`react-shim.d.ts`、`css.d.ts` 都归位 `src/client/`；宿主模块留 `src/` 根。
+- **拆 CSS 或带多模块的包**：客户端专属模块（`md/code/renderer` 等）、
+  `style.css`、`css.d.ts`、`locales.ts` 都归位 `src/client/`；宿主模块留 `src/` 根
+  （React 类型由根 devDep `@types/react` 提供，不再需要包内 shim）。
 - **宿主 & 客户端共享**的模块（如双端共用的后缀表 / 契约常量）留 `src/` 根，
   客户端经 `../grouping.js` 引用——不要为"客户端专用"而把共享模块搬走。
 - **例外：包内 `src/shared/**`（#769 起）**。双端共享且要求**零 import**（或只做同目录
@@ -780,7 +781,7 @@ entries }`——兼容字段 `exports` = **主入口**的导出面、`declBlocks
    这类**有界轮次上限**是伪装成轮询的墙钟预算——#771 实测 2000 次 `setImmediate` 只值
    7.3ms 墙钟（3.67µs/轮）：无负载时 21 轮 / 2ms 命中，注入 10ms 的 fs 往返延迟即耗尽 2000 轮，
    断言以 `expected false to be true` 假红，并让 Stryker dry run 整段 `ConfigError`
-   （该用例被 12/32 个变异段共用）。等待异步条件必须等**语义终点**：由被测代码在观测点
+   （#771 当时口径：该用例被 12/32 个变异段共用）。等待异步条件必须等**语义终点**：由被测代码在观测点
    兑现的可注入同步点（deferred / barrier），或被测面提供的可等待句柄（`await flushNow()`）。
    确需防挂死时，兜底只能挂在**失败路径**（如与「被测动作自身完成」竞速：窗口没开而动作
    已结束即判红），且不得把兜底当成功判据，也不得用更大轮数 / 更长墙钟「再赌一次」。

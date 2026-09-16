@@ -1,6 +1,6 @@
 # dsh-lan-proxy 架构与运行机制（图解）
 
-> 包：`@wingsky-1/dsh-lan-proxy` · 源码：`packages/dsh-lan-proxy/` · 版本：0.2.0
+> 包：`@wingsky-1/dsh-lan-proxy` · 源码：`packages/dsh-lan-proxy/` · 版本：0.2.4
 > 功能一句话：**局域网访问 dsh web UI**——在 `0.0.0.0:<port>` 监听，把 HTTP/HTTPS 与
 > WebSocket/wss 转发到回环 web 服务器（默认 `127.0.0.1:3080`），并附带 DNS 重绑定防护、
 > HTTPS 并存、WS 压缩桥接、HTTP 响应压缩与 launch-token 自动注入。
@@ -36,7 +36,7 @@
 
 ## 2. 插件装配流程
 
-`apply(ctx)` 在宿主启动时被调用，按固定顺序装配（`src/apply.ts`，同步返回，转发器在
+`apply(ctx)` 在宿主启动时被调用，按固定顺序装配（`src/server/apply.ts`，同步返回，转发器在
 `sync()` 内立即启动）：
 
 ```mermaid
@@ -179,12 +179,12 @@ httpCompressEnabled, httpCompressLevel, injectToken`），GUI 在「设置 → �
 
 | 机制 | 实现位置 | 要点 |
 |---|---|---|
-| targetHost 回环白名单 | `isLoopbackTarget`（`proxy.ts#isLoopbackTarget`）+ 配置层校验 + `createLanProxy` 入口强校验 | 只允许 `localhost`/`127.0.0.1`/`::1`，防开放转发/SSRF（三层防线） |
-| 入站 Host 校验（DNS 重绑定防御） | `hostnameAllowed`（`proxy.ts#hostnameAllowed`） | 仅接受 IP 字面量或 `localhost`，任何 DNS 域名 403/断开；对 HTTP 与 WS 入站同样生效 |
+| targetHost 回环白名单 | `isLoopbackTarget`（`server/shared/net.ts#isLoopbackTarget`，配置校验与引擎入口共用的同一份实现）+ 配置层校验 + `createLanProxy` 入口强校验 | 只允许 `localhost`/`127.0.0.1`/`::1`，防开放转发/SSRF（三层防线） |
+| 入站 Host 校验（DNS 重绑定防御） | `hostnameAllowed`（`server/proxy/impl/proxy.ts#hostnameAllowed`） | 仅接受 IP 字面量或 `localhost`，任何 DNS 域名 403/断开；对 HTTP 与 WS 入站同样生效 |
 | 配置/health 路由围栏 | `isLoopbackRequest`（shared/loopback.js） | remoteAddress 回环 + Host 回环 + 非 cross-site + Origin 与 Host 一致 |
 | 凭据透传范围 | `rewriteHeaders` / `bridgeUpstreamHeaders` | 只覆盖 Host/Origin，Cookie/Authorization 原样透传；WS 桥接剥离 hop-by-hop 与 sec-websocket-* 头；上游被 targetHost 强制回环，凭据不出进程边界 |
-| HTTPS 私钥 | cert.ts | 自签名私钥落盘 0600；用户证书文件成对校验 |
-| injectToken | `proxy.ts#withLaunchToken` / `proxy.ts#isTokenMintCandidate` | 仅「GET / 且无 token」注入；有 cookie 绝不注入（防 303 死循环）；401 重放一次封顶 |
+| HTTPS 私钥 | `server/tls/impl/index.ts` | 自签名私钥落盘 0600；用户证书文件成对校验 |
+| injectToken | `server/proxy/impl/proxy.ts#withLaunchToken` / `#isTokenMintCandidate` | 仅「GET / 且无 token」注入；有 cookie 绝不注入（防 303 死循环）；401 重放一次封顶 |
 
 > 全量安全语义（含跨站残余面分析、health 元数据可见性等）见包 README「安全模型」节。
 
