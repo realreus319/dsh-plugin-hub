@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 780" role="img" aria-labelledby="title desc">
+<title id="title">dsh-lan-proxy 数据架构</title>
+<desc id="desc">以功能模块为节点，展示数据架构中的职责与协作关系。实现细节见架构正文。</desc>
+<defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#546780"/></marker></defs>
+<rect width="1400" height="780" fill="#f5f5f5"/>
+<text x="40" y="57" font-size="30" fill="#2d3142" font-family="system-ui,sans-serif">dsh-lan-proxy · DA 数据架构</text>
+<rect x="380" y="115" width="600" height="530" rx="14" fill="#eef0f3" stroke="#d5dbe4"/>
+<text x="398" y="142" font-size="16" fill="#64748b" font-family="system-ui,sans-serif">数据管理职责</text>
+<path d="M340 210H520" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="430" y="195" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">配置读写</text>
+<path d="M1050 210H820" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="935" y="195" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">导入配置</text>
+<path d="M520 245H405V420H190V460" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="282" y="402" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">生效配置</text>
+<path d="M340 510H520" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="430" y="495" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">运行统计</text>
+<path d="M670 260V460" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="742" y="360" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">配置概况</text>
+<path d="M520 555H375V305H190V260" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="281" y="320" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">返回运行概况</text>
+<path d="M1050 510H970V625H190V560" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="719" y="611" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">向代理提供证书材料</text>
+<g id="ui">
+<rect x="40" y="160" width="300" height="100" rx="9" fill="#edf3fb" stroke="#5777a5" stroke-width="1.5"/>
+<text x="60" y="200" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">设置界面</text>
+<text x="60" y="233" font-family="system-ui,sans-serif" font-size="17" fill="#546780">编辑配置并读取运行概况</text>
+</g>
+<g id="cfg">
+<rect x="520" y="160" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="540" y="200" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">配置管理</text>
+<text x="540" y="233" font-family="system-ui,sans-serif" font-size="17" fill="#546780">持有生效配置并对接宿主设置</text>
+</g>
+<g id="legacy">
+<rect x="1050" y="160" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="1070" y="200" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">配置迁移</text>
+<text x="1070" y="233" font-family="system-ui,sans-serif" font-size="17" fill="#546780">读取旧配置并导入现有设置</text>
+</g>
+<g id="runtime">
+<rect x="40" y="460" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="60" y="500" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">代理运行管理</text>
+<text x="60" y="533" font-family="system-ui,sans-serif" font-size="17" fill="#546780">持有连接、认证上下文与统计</text>
+</g>
+<g id="obs">
+<rect x="520" y="460" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="540" y="500" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">状态查询</text>
+<text x="540" y="533" font-family="system-ui,sans-serif" font-size="17" fill="#546780">汇集配置与代理运行概况</text>
+</g>
+<g id="cert">
+<rect x="1050" y="460" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="1070" y="500" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">证书管理</text>
+<text x="1070" y="533" font-family="system-ui,sans-serif" font-size="17" fill="#546780">管理证书材料与本地缓存</text>
+</g>
+<text x="40" y="753" font-size="14" fill="#64748b" font-family="system-ui,sans-serif">功能模块视图 · 连线表示模块协作 · 函数、字段及运行机制详见架构正文</text>
+</svg>

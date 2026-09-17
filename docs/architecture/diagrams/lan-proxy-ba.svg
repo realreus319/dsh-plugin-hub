@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 780" role="img" aria-labelledby="title desc">
+<title id="title">dsh-lan-proxy 业务架构</title>
+<desc id="desc">以功能模块为节点，展示业务架构中的职责与协作关系。实现细节见架构正文。</desc>
+<defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#546780"/></marker></defs>
+<rect width="1400" height="780" fill="#f5f5f5"/>
+<text x="40" y="57" font-size="30" fill="#2d3142" font-family="system-ui,sans-serif">dsh-lan-proxy · BA 业务架构</text>
+<rect x="390" y="118" width="940" height="530" rx="14" fill="#eef0f3" stroke="#d5dbe4"/>
+<text x="408" y="145" font-size="16" fill="#64748b" font-family="system-ui,sans-serif">局域网访问能力</text>
+<path d="M350 240H440" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="390" y="225" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">访问</text>
+<path d="M740 240H1010" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="872" y="225" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">连接工作台</text>
+<path d="M350 510H440" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="390" y="495" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">设置</text>
+<path d="M590 460V290" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="665" y="380" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">控制访问策略</text>
+<path d="M740 510H1010" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="875" y="495" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">配置页面兼容</text>
+<path d="M1160 460V290" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1223" y="380" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">支持页面能力</text>
+<g id="user">
+<rect x="50" y="190" width="300" height="100" rx="9" fill="#edf3fb" stroke="#5777a5" stroke-width="1.5"/>
+<text x="70" y="230" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">局域网使用者</text>
+<text x="70" y="263" font-family="system-ui,sans-serif" font-size="17" fill="#546780">在其他设备使用同一套工作台</text>
+</g>
+<g id="access">
+<rect x="440" y="190" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="460" y="230" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">远程访问</text>
+<text x="460" y="263" font-family="system-ui,sans-serif" font-size="17" fill="#546780">提供工作台页面与会话连接</text>
+</g>
+<g id="work">
+<rect x="1010" y="190" width="300" height="100" rx="9" fill="#edf3fb" stroke="#5777a5" stroke-width="1.5"/>
+<text x="1030" y="230" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">宿主工作台</text>
+<text x="1030" y="263" font-family="system-ui,sans-serif" font-size="17" fill="#546780">承载会话、工具与文件操作</text>
+</g>
+<g id="admin">
+<rect x="50" y="460" width="300" height="100" rx="9" fill="#edf3fb" stroke="#5777a5" stroke-width="1.5"/>
+<text x="70" y="500" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">管理员</text>
+<text x="70" y="533" font-family="system-ui,sans-serif" font-size="17" fill="#546780">调整访问策略与服务配置</text>
+</g>
+<g id="manage">
+<rect x="440" y="460" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="460" y="500" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">访问管理</text>
+<text x="460" y="533" font-family="system-ui,sans-serif" font-size="17" fill="#546780">管理监听、加密与访问授权</text>
+</g>
+<g id="compat">
+<rect x="1010" y="460" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="1030" y="500" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">页面兼容</text>
+<text x="1030" y="533" font-family="system-ui,sans-serif" font-size="17" fill="#546780">适配远程页面的宿主能力声明</text>
+</g>
+<text x="40" y="753" font-size="14" fill="#64748b" font-family="system-ui,sans-serif">功能模块视图 · 连线表示模块协作 · 函数、字段及运行机制详见架构正文</text>
+</svg>

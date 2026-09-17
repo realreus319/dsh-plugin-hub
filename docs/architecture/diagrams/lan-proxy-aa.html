@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lan-proxy 应用架构</title>
+<style>body{margin:0;padding:24px;background:#f5f5f5}main{max-width:1400px;margin:auto}svg{display:block;width:100%;height:auto}</style></head>
+<body><main>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 780" role="img" aria-labelledby="title desc">
+<title id="title">dsh-lan-proxy 应用架构</title>
+<desc id="desc">以功能模块为节点，展示应用架构中的职责与协作关系。实现细节见架构正文。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#546780"/></marker></defs>
+<rect width="1400" height="780" fill="#f5f5f5"/>
+<text x="40" y="57" font-size="30" fill="#2d3142" font-family="system-ui,sans-serif">dsh-lan-proxy · AA 应用架构</text>
+<rect x="20" y="115" width="950" height="595" rx="14" fill="#eef0f3" stroke="#d5dbe4"/>
+<text x="38" y="142" font-size="16" fill="#64748b" font-family="system-ui,sans-serif">宿主插件</text>
+<rect x="1000" y="115" width="370" height="530" rx="14" fill="#eef0f3" stroke="#d5dbe4"/>
+<text x="1018" y="142" font-size="16" fill="#64748b" font-family="system-ui,sans-serif">浏览器与宿主扩展点</text>
+<path d="M360 210H620" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="490" y="195" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">设置与变更通知</text>
+<path d="M1190 160V92H210V160" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="800" y="88" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">管理请求</text>
+<path d="M210 390V260" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="265" y="335" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">迁移配置</text>
+<path d="M770 260V390" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="835" y="335" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">准备加密材料</text>
+<path d="M650 260V315H575V630H620" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="510" y="490" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">启停代理</text>
+<path d="M770 490V580" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="835" y="542" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">提供证书材料</text>
+<path d="M920 245H980V440H1040" fill="none" stroke="#546780" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1050" y="305" text-anchor="middle" font-size="16" font-family="system-ui,sans-serif" fill="#546780" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">注册页面扩展</text>
+<g id="config">
+<rect x="60" y="160" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="80" y="200" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">配置模块</text>
+<text x="80" y="233" font-family="system-ui,sans-serif" font-size="17" fill="#546780">提供设置模型与管理接口</text>
+</g>
+<g id="root">
+<rect x="620" y="160" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="640" y="200" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">装配模块</text>
+<text x="640" y="233" font-family="system-ui,sans-serif" font-size="17" fill="#546780">协调配置、监听与插件生命周期</text>
+</g>
+<g id="client">
+<rect x="1040" y="160" width="300" height="100" rx="9" fill="#edf3fb" stroke="#5777a5" stroke-width="1.5"/>
+<text x="1060" y="200" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">客户端模块</text>
+<text x="1060" y="233" font-family="system-ui,sans-serif" font-size="17" fill="#546780">提供设置界面与能力提示</text>
+</g>
+<g id="migrate">
+<rect x="60" y="390" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="80" y="430" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">迁移模块</text>
+<text x="80" y="463" font-family="system-ui,sans-serif" font-size="17" fill="#546780">将旧配置导入现有设置体系</text>
+</g>
+<g id="tls">
+<rect x="620" y="390" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="640" y="430" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">证书模块</text>
+<text x="640" y="463" font-family="system-ui,sans-serif" font-size="17" fill="#546780">加载或生成加密访问材料</text>
+</g>
+<g id="proxy">
+<rect x="620" y="580" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="640" y="620" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">代理模块</text>
+<text x="640" y="653" font-family="system-ui,sans-serif" font-size="17" fill="#546780">处理请求转发与连接桥接</text>
+</g>
+<g id="trust">
+<rect x="1040" y="390" width="300" height="100" rx="9" fill="#ffffff" stroke="#d87a49" stroke-width="1.5"/>
+<text x="1060" y="430" font-family="system-ui,sans-serif" font-size="23" font-weight="600" fill="#2d3142">页面兼容模块</text>
+<text x="1060" y="463" font-family="system-ui,sans-serif" font-size="17" fill="#546780">通过宿主页面扩展点提供兼容支持</text>
+</g>
+<text x="40" y="753" font-size="14" fill="#64748b" font-family="system-ui,sans-serif">功能模块视图 · 连线表示模块协作 · 函数、字段及运行机制详见架构正文</text>
+</svg>
+</main></body></html>
