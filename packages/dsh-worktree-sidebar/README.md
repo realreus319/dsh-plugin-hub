@@ -16,17 +16,19 @@ dsh 的右侧栏文件树根固定取 `session.header.cwd`，且该字段创建�
 | 工具 | 作用 |
 |---|---|
 | `ws_worktree_register` | 把一个**已存在**的 worktree 登记给当前会话 |
-| `ws_worktree_create` | 先 `git worktree add` 建出来，再登记（路径与分支由调用方给出，插件不设目录约定） |
+| `ws_worktree_create` | 先 `git worktree add` 建出来，再登记（路径与分支由调用方给出，插件不设目录约定）；可选 `base` 指定起点，缺省是会话工作目录所在仓库的当前 HEAD |
 | `ws_worktree_remove` | 摘掉登记；只有显式给出参数才连带 `git worktree remove` 删目录 |
 
 登记之后**打开或刷新**右侧栏的 Files 页签，列的就是该 worktree 的内容，点开的文件预览读的也是 worktree 里的那一份。
 页签**不会自动跟随**：插件不轮询宿主，只在「打开页签 / 点官方刷新 / 窗口重新可见或获得焦点」这三种时机重读登记。
 
-子 agent 的会话继承父会话的登记：子会话自己没有登记时，它右侧栏的 Files 页签指向父会话登记的那个 worktree（父链到顶、父会话摘除即回退到自己的 cwd）。
+子 agent 的会话与**用户 fork 出来的会话**都继承父会话的登记：自己没有登记时，右侧栏的 Files 页签指向父链上**第一个持有登记**的那个会话所绑定的 worktree（父链到顶、那条登记被摘除即回退到自己的 cwd）。判据同在会话 header 的 `parentSession`，本插件刻意不区分这两种形态——fork 的 header 同样拷了父的 cwd，视图根跟着一起继承才与「文件根是会话 cwd 的改写」自洽。
 
 工具对 **git 仓库内的所有 agent（含子 agent）**暴露：每个 agent 注册时按其会话目录判断，不在 git 仓库里就不注册。执行期还有一次兜底校验，环境在两次之间变了也不会按错误前提动作。
 
 三个工具同时带一个可见的返回文本，写明当前指向哪个 worktree、分支是什么 —— 让模型不必额外调一次工具就能确认状态。
+
+`ws_worktree_create` 的 `base` 是 commit-ish（分支、tag、SHA，如 `origin/main`）。它会先做形态校验（拒绝 `-` 开头的值）再归一化成 SHA 交给 git：起点位置在 `<path>` 之后，git 会**重新开始选项解析**（实测 `base: "-f"` / `"--force"` 会报成功却从 HEAD 建），归一化成 SHA 之后无处下手。
 
 ## 显式非目标（已知不一致清单）
 
@@ -99,7 +101,7 @@ pnpm gate:pr                 # 开 PR 前；新增包与 catalog 条目另需 pn
 1. 打开或刷新 Files 页签后，文件树列的是 worktree 内容；
 2. 点开文件预览读的是 worktree 里的文件；
 3. 未登记会话、以及未安装本插件时的行为一致（无回归）；
-4. 子 agent 会话的树根跟随父会话的登记。
+4. 子 agent 会话与 fork 会话的树根跟随父链上持有登记的那个会话，且继承态下三个工具的读数与侧边栏一致。
 
 ## 兼容性（只读耦合点）
 
@@ -119,7 +121,7 @@ pnpm gate:pr                 # 开 PR 前；新增包与 catalog 条目另需 pn
 - **不回主仓库路径**：绑定查询只回 `{ revision, worktreePath | null }`，不回 `repoRoot` —— 客户端只需要目录根。
 - **git 只经 `execFile` + argv**：不经 shell，路径与分支名里的空白、`;`、`$()` 不会被重新解释。
 - **分支名交给 git 自己校验**（`git check-ref-format --branch`）；所有位置参数前加 `--`，形如 `--force` 的路径不会被当成标志。
-- **省略分支时显式 `--detach`**：`git worktree add <path>` 的默认行为是**新建一个以目录 basename 命名的分支**，basename 含空格（macOS 家目录常见）会被 git 拒为非法分支名，以 `-` 开头则会被它当成开关二次解析——而 `--` 只挡得住 worktree add 自己的选项解析。补上 `--detach` 之后「省略分支」才真的是「checkout 仓库 HEAD（detached）」。
+- **省略分支时显式 `--detach`**：`git worktree add <path>` 的默认行为是**新建一个以目录 basename 命名的分支**，basename 含空格（macOS 家目录常见）会被 git 拒为非法分支名，以 `-` 开头则会被它当成开关二次解析——而 `--` 只挡得住 worktree add 自己的选项解析。补上 `--detach` 之后「省略分支」才真的是「checkout 起点（detached）」——缺省起点是仓库 HEAD，提供 `base` 时 checkout 的就是 `base` 指定的那个起点。
 - **删除是显式的**：`ws_worktree_remove` 默认只摘登记，只有显式参数才执行 `git worktree remove`，且 `--force` 需要再单独显式给出（默认不丢未提交改动）。插件只做 `git worktree remove`，不 `rm -rf`。
 - **落盘在 `DSH_HOME` 下**：`bindings.json` 以临时文件 + `rename` 原子写；文件损坏、版本不符一律当空表，不猜着读。
 - **工具不下发权限**：工具只写自己的登记表并调用 git；不读凭据、不联网。
@@ -134,6 +136,9 @@ pnpm gate:pr                 # 开 PR 前；新增包与 catalog 条目另需 pn
 - **安装 / 升级后需重启一次** `dsh web`。
 - **每会话状态随插件卸载一起释放**：客户端不再做存活性推断（按会话剪枝已在去轮询换根时删除），快照只用来改写 `byId[sessionId].cwd` 这一个字段；视图与订阅在本插件卸载时被收掉（`ctx.effect` 里 `releaseAllSeedings()` + `views.clear()`），视图缓存另有 128 条上限（淘汰最冷的会话；每个视图都是同一份宿主事实的独立读数，淘汰不会让树读到另一个地方）。
 - **同进程第二次装配会显式抛错**：五个域都是进程内单例（`install` / `release` 成对 + `installed` 守卫），第二份实例挂不上并在第二次 `install` 时抛错，而不是静默共享状态。若某个 profile 把本包挂了两次，表现是启动期一条明确的报错；旧的「两份实例互不干扰」语义已不存在。
+- **继承是每次沿父链解析的**：右栏的根来自父链上第一个持有登记的会话，那条登记被摘除、或在解析时被判定失效，后代会话立即回退到自己的 cwd（不会静默指向已不成立的根）。
+- **接管未生效时工具与侧边栏会不一致（刻意）**：`workspaceFileScope` 的接管有等待态（provider 尚未注册）与让位态（被第三方占用），这两态下插件不动文件根、侧边栏仍按 cwd，而三个工具回报的是**登记事实**。以 `/health` 的 `scopeTakeover` 为准（`live` 之外都不换根）。
+- **继承态下 `ws_worktree_remove` 不会摘父会话的登记、也不会删目录**：它只说明根属于哪个会话，并给出出路（在那条会话解绑 / 在本会话绑别的 worktree / 把本会话登记到它自己的 cwd）。
 
 ## 落幕判据
 

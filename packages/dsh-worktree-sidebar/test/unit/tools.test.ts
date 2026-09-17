@@ -38,6 +38,9 @@ afterAll(() => cleanup(root));
 /** 会话 header 的创建时间：绑定记录要靠它区分「同一个会话」与「重启后复用同一 id 的另一个会话」。 */
 const SESSION_CREATED_AT = 1_700_000_000_000;
 
+/** 假 git 域把起点归一化成的 SHA：断言 argv 里出现的是它，而不是调用方给的原始 rev。 */
+const START_SHA = "1111111111111111111111111111111111111111";
+
 function fakeDeps(
   options: {
     /** 归属判定读数；缺省按「本临时根下、且不是主仓库本身」判 same。 */
@@ -47,10 +50,20 @@ function fakeDeps(
     removeOk?: boolean;
     worktreeList?: readonly { path: string; branch: string | undefined; detached: boolean }[];
     agents?: AgentPort;
+    /** 起点归一化失败（git 说不认识这个 rev）。 */
+    resolveCommitFails?: boolean;
+    /** 活会话的父链：子会话 id → 父会话 id（缺省没有父）。 */
+    parents?: Record<string, string>;
+    /** 已经确认失效的登记：scope 端口解析到它就摘掉并继续上跳，复刻真实自愈。 */
+    staleBindings?: readonly string[];
+    /** 让 scope 端口抛出这个错误（复刻域未装配 / 已释放），用来钉住异常收口的文案面。 */
+    scopeThrows?: string;
   } = {},
 ) {
   const table = new Map<string, BindingRecord>();
   const gitCalls: string[][] = [];
+  /** 起点归一化的入参（dir, rev）：形态 guard 命中时这里必须一条都没有。 */
+  const resolveCalls: Array<[string, string]> = [];
   const writes: Array<{ session: string; record: BindingRecord }> = [];
   const drops: string[] = [];
   const warns: string[] = [];
@@ -87,9 +100,13 @@ function fakeDeps(
       },
       headBranch: async () => "feature",
       checkRefFormat: async (branch) => !branch.includes(" "),
-      addWorktree: async (r, path, branch) => {
-        gitCalls.push(["add", r, path, branch ?? ""]);
+      addWorktree: async (r, path, branch, base) => {
+        gitCalls.push(["add", r, path, branch ?? "", base ?? ""]);
         return options.addOk === false ? { ok: false, reason: "already exists" } : { ok: true };
+      },
+      resolveCommit: async (dir, rev) => {
+        resolveCalls.push([dir, rev]);
+        return options.resolveCommitFails === true ? undefined : START_SHA;
       },
       removeWorktree: async (r, path, force) => {
         gitCalls.push(["remove", r, path, String(force)]);
@@ -103,6 +120,33 @@ function fakeDeps(
           { path: existingWt, branch: "refs/heads/feature", detached: false },
         ],
     },
+    scope: {
+      // 复刻 scope 域的真实三态（own / inherited / none）与它的一条硬语义：解析到已确认失效的
+      // 登记时**摘掉并继续上跳**。写成「找不到就硬编码 inherited」会让下面所有继承态用例变成装饰。
+      worktreeOrigin: async (id) => {
+        // 抛的可以是内部装配文案（`dsh-worktree-sidebar: scope 域尚未装配`）——收口后它不该到模型面前。
+        if (options.scopeThrows !== undefined) throw new Error(options.scopeThrows);
+        const seen = new Set<string>([id]);
+        let current = id;
+        for (;;) {
+          const record = table.get(current);
+          if (record !== undefined) {
+            if (options.staleBindings?.includes(current) === true) {
+              table.delete(current);
+              drops.push(current);
+            } else if (current === id) {
+              return { kind: "own", record };
+            } else {
+              return { kind: "inherited", record, ownerSessionId: current };
+            }
+          }
+          const parent = options.parents?.[current];
+          if (parent === undefined || seen.has(parent)) return { kind: "none" };
+          seen.add(parent);
+          current = parent;
+        }
+      },
+    },
     agents: options.agents ?? {
       subscribe: () => () => undefined,
       list: () => [],
@@ -110,8 +154,20 @@ function fakeDeps(
     },
   };
 
-  return { deps, table, gitCalls, writes, drops, warns };
+  return { deps, table, gitCalls, resolveCalls, writes, drops, warns };
 }
+
+/**
+ * 父会话那条登记（继承面的源）。写成函数是因为 repo / existingWt 在 beforeAll 里才赋值——
+ * 模块级常量会取到空串，用例就在测一个不存在的路径。
+ */
+const parentRecord = (): BindingRecord => ({
+  repoRoot: repo,
+  worktreeRoot: existingWt,
+  branch: "feature",
+  createdAt: "2026-09-14T00:00:00.000Z",
+  sessionCreatedAt: SESSION_CREATED_AT,
+});
 
 /**
  * 假执行上下文。被测代码只读 `exec.agent.session`：身份、取消信号与上下文延迟这些字段
@@ -293,7 +349,7 @@ describe("ws_worktree_create", () => {
     const { deps, gitCalls, writes } = fakeDeps();
     const value = await run(buildCreateTool(deps), { path: newPath(), branch: "feat-x" });
     expect(value.ok).toBe(true);
-    expect(gitCalls).toEqual([["add", repo, newPath(), "feat-x"]]);
+    expect(gitCalls).toEqual([["add", repo, newPath(), "feat-x", ""]]);
     expect(writes[0]?.record.worktreeRoot).toBe(newPath());
   });
 
@@ -360,6 +416,43 @@ describe("ws_worktree_create", () => {
     expect(value.ok).toBe(false);
     expect(value.detail).toContain("The worktree was created at " + newPath());
     expect(value.detail).toContain("left in place");
+  });
+
+  it("base 归一化：git 侧拿到的是 SHA，原始 rev 只用于解析", async () => {
+    const { deps, gitCalls, resolveCalls } = fakeDeps();
+    const value = await run(buildCreateTool(deps), { path: newPath(), base: "origin/main" });
+    expect(value.ok).toBe(true);
+    expect(resolveCalls).toEqual([[repo, "origin/main"]]);
+    expect(gitCalls).toEqual([["add", repo, newPath(), "", START_SHA]]);
+  });
+
+  it("base 以 - 开头一律在调用 git 之前判失败", async () => {
+    // 实测：worktree add -b br -- <path> --force 与 -f 都 rc=0，但起点被静默忽略、从 HEAD 建；
+    // -badref 会被二次解析成 git branch 的选项。三者都必须在 argv 之前拦下。
+    for (const base of ["--force", "-f", "-badref"]) {
+      const { deps, gitCalls, resolveCalls } = fakeDeps();
+      const value = await run(buildCreateTool(deps), { path: newPath(), base });
+      expect(value.ok).toBe(false);
+      expect(value.detail).toContain("Not a valid start point: " + base);
+      expect(gitCalls.length).toBe(0);
+      expect(resolveCalls.length).toBe(0);
+    }
+  });
+
+  it("base 解析不出来时判失败，且不建目录", async () => {
+    const { deps, gitCalls, resolveCalls } = fakeDeps({ resolveCommitFails: true });
+    const value = await run(buildCreateTool(deps), { path: newPath(), base: "nosuchref" });
+    expect(value.ok).toBe(false);
+    expect(value.detail).toBe("Not a valid start point: nosuchref.");
+    expect(resolveCalls).toEqual([[repo, "nosuchref"]]);
+    expect(gitCalls.length).toBe(0);
+  });
+
+  it("不给 base 时不解析起点，起点位置参数为空", async () => {
+    const { deps, gitCalls, resolveCalls } = fakeDeps();
+    await run(buildCreateTool(deps), { path: newPath(), branch: "feat-x" });
+    expect(resolveCalls.length).toBe(0);
+    expect(gitCalls).toEqual([["add", repo, newPath(), "feat-x", ""]]);
   });
 });
 
@@ -437,23 +530,20 @@ describe("ws_worktree_remove", () => {
     // 本用例这一层能判的只有「失败说得清」——上一条断言即是全部。
   });
 
-  it("removeDirectory 之前登记消失（竞态）：如实说明，不静默成功", async () => {
+  it("removeDirectory 用的是解析到的记录，不再回来读一次表", async () => {
     const fake = await withBinding();
-    let gets = 0;
-    const racing: ToolsDeps = {
+    const snapshotOnly: ToolsDeps = {
       ...fake.deps,
       binding: {
         ...fake.deps.binding,
-        // 第一次是顶部的 stateOf，第二次是删目录前的复核——那一次让记录消失。
-        get: (id) => {
-          gets += 1;
-          return gets === 1 ? fake.table.get(id) : undefined;
-        },
+        // 解析走的是 scope 端口里的表快照；这里让**随后**的任何直接读表都拿不到记录，
+        // 用来钉住「删目录用的是解析结果，不存在第二次读取造成的含糊失败」。
+        get: () => undefined,
       },
     };
-    const value = await run(buildRemoveTool(racing), { removeDirectory: true });
-    expect(value.ok).toBe(false);
-    expect(value.detail).toContain("binding disappeared");
+    const value = await run(buildRemoveTool(snapshotOnly), { removeDirectory: true });
+    expect(value.ok).toBe(true);
+    expect(value.detail).toContain("removed the worktree directory");
   });
 
   it("目录删掉了但摘登记失败：明确说这是陈旧登记、会被按未绑定处理", async () => {
@@ -485,6 +575,118 @@ describe("ws_worktree_remove", () => {
     expect(value.detail).toContain("contains modified files");
     expect(drops.length).toBe(0);
     expect(table.has("s1")).toBe(true);
+  });
+});
+
+describe("继承态下的工具面（#847）", () => {
+  it("remove（不删目录）：判失败、报来源会话与现状，不摘父记录、不调 git", async () => {
+    const { deps, table, drops, gitCalls } = fakeDeps({ parents: { s1: "parent" } });
+    table.set("parent", parentRecord());
+    const value = await run(buildRemoveTool(deps), {});
+    expect(value.ok).toBe(false);
+    expect(value.bound).toBe(true);
+    expect(value.worktree).toBe(existingWt);
+    expect(value.branch).toBe("feature");
+    expect(value.detail).toContain("inherited from session parent");
+    expect(value.detail).toContain("ws_worktree_remove");
+    expect(value.detail).toContain("ws_worktree_register");
+    expect(drops).toEqual([]);
+    expect(gitCalls.length).toBe(0);
+    expect(table.has("parent")).toBe(true);
+  });
+
+  it("remove（removeDirectory: true）：同样不摘父记录、不删目录", async () => {
+    const { deps, table, drops, gitCalls } = fakeDeps({ parents: { s1: "parent" } });
+    table.set("parent", parentRecord());
+    const value = await run(buildRemoveTool(deps), { removeDirectory: true, force: true });
+    expect(value.ok).toBe(false);
+    expect(value.bound).toBe(true);
+    expect(drops).toEqual([]);
+    expect(gitCalls.length).toBe(0);
+    expect(table.has("parent")).toBe(true);
+  });
+
+  it("来源报的是最近一个持有登记的祖先，不是直接父", async () => {
+    const { deps, table } = fakeDeps({ parents: { s1: "mid", mid: "grand" } });
+    table.set("grand", parentRecord());
+    const value = await run(buildRemoveTool(deps), {});
+    expect(value.detail).toContain("inherited from session grand");
+  });
+
+  it("register / create 在继承态下的失败读数仍报继承现状（bound=true）", async () => {
+    const { deps, table } = fakeDeps({ parents: { s1: "parent" } });
+    table.set("parent", parentRecord());
+    const missing = join(root, "no-such-dir");
+    const registered = await run(buildRegisterTool(deps), { worktree: missing });
+    expect(registered.ok).toBe(false);
+    expect(registered.bound).toBe(true);
+    expect(registered.worktree).toBe(existingWt);
+    expect(registered.detail).toContain("inherited from session parent");
+    const created = await run(buildCreateTool(deps), { path: missing, branch: "bad name" });
+    expect(created.ok).toBe(false);
+    expect(created.bound).toBe(true);
+    expect(created.worktree).toBe(existingWt);
+    expect(created.detail).toContain("inherited from session parent");
+  });
+
+  it("摘掉自己的登记后若父链还有登记，明说右栏改为继承", async () => {
+    const { deps, table } = fakeDeps({ parents: { s1: "parent" } });
+    table.set("parent", parentRecord());
+    const registered = await run(buildRegisterTool(deps), { worktree: existingWt });
+    expect(registered.ok).toBe(true);
+    const value = await run(buildRemoveTool(deps), {});
+    expect(value.ok).toBe(true);
+    expect(value.bound).toBe(true);
+    expect(value.worktree).toBe(existingWt);
+    expect(value.detail).toContain("inherited from session parent");
+  });
+
+  it("父链上的登记已确认失效时，工具调用先摘掉它（自愈副作用在工具路径上照样发生）", async () => {
+    const { deps, table, drops } = fakeDeps({
+      parents: { s1: "parent" },
+      staleBindings: ["parent"],
+    });
+    table.set("parent", parentRecord());
+    const value = await run(buildRemoveTool(deps), {});
+    expect(drops).toEqual(["parent"]);
+    expect(table.has("parent")).toBe(false);
+    expect(value.ok).toBe(false);
+    expect(value.bound).toBe(false);
+    expect(value.detail).toContain("No worktree is bound");
+  });
+});
+
+describe("绑定来源读不出来时的收口（复核 P3-5）", () => {
+  // 抛的正是 scope 域未装配时的内部文案：它不该出现在模型读到的 detail 里。
+  const INTERNAL = "dsh-worktree-sidebar: scope 域尚未装配";
+
+  it("remove：报可读失败、不透出内部装配文案，且原因进 logger", async () => {
+    const { deps, warns } = fakeDeps({ scopeThrows: INTERNAL });
+    const value = await run(buildRemoveTool(deps), {});
+    expect(value.ok).toBe(false);
+    expect(value.bound).toBe(false);
+    expect(value.detail).toContain("Could not read this session's binding state");
+    expect(value.detail).not.toContain("尚未装配");
+    expect(warns.join("\n")).toContain("尚未装配");
+  });
+
+  it("create：报可读失败，且不建目录、不落绑定", async () => {
+    const { deps, gitCalls, writes } = fakeDeps({ scopeThrows: INTERNAL });
+    const value = await run(buildCreateTool(deps), { path: join(root, "wt-new") });
+    expect(value.ok).toBe(false);
+    expect(value.detail).toContain("Could not read this session's binding state");
+    expect(value.detail).not.toContain("尚未装配");
+    expect(gitCalls.length).toBe(0);
+    expect(writes.length).toBe(0);
+  });
+
+  it("register：报可读失败，且不落绑定", async () => {
+    const { deps, writes } = fakeDeps({ scopeThrows: INTERNAL });
+    const value = await run(buildRegisterTool(deps), { worktree: existingWt });
+    expect(value.ok).toBe(false);
+    expect(value.detail).toContain("Could not read this session's binding state");
+    expect(value.detail).not.toContain("尚未装配");
+    expect(writes.length).toBe(0);
   });
 });
 

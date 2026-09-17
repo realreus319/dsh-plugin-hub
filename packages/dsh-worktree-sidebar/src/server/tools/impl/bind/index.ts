@@ -1,12 +1,16 @@
 /**
- * 三个工具共用的绑定动作：路径解析、归属校验、落登记、读现状。
+ * 三个工具共用的绑定动作：来源读取、路径解析、归属校验、落登记。
  *
  * 校验顺序是刻意的：先「存在且是目录」（本地事实，最便宜），再「属于同一仓库」（要起 git）。
  * 反过来的话，一个手误的路径会先换来一次 git 调用和一句含糊的 git 报错。
+ *
+ * 绑定来源**只从 scope 域读**（`readOrigin`）：侧边栏的生效根与工具面的现状读数因此同源，
+ * 工具才不会在 fork 出来的会话里回一句「本会话没有绑定」——那正是 #847 要修的缺陷。
  */
 import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { BindingRecord } from "../../../binding/interface.ts";
+import type { WorktreeOrigin } from "../../../scope/interface.ts";
 import type { AgentFace, ToolsDeps } from "../../deps.ts";
 import type { SessionFace } from "../session/index.ts";
 import type { ToolResultValue } from "../protocol/index.ts";
@@ -18,16 +22,72 @@ export interface BindingState {
   readonly branch: string;
 }
 
-/** 读某个会话的当前绑定状态。 */
-export function stateOf(deps: ToolsDeps, sessionId: string): BindingState {
-  const record = deps.binding.get(sessionId);
-  if (record === undefined) return { bound: false, worktree: "", branch: "" };
-  return { bound: true, worktree: record.worktreeRoot, branch: record.branch };
+/**
+ * 还没解析出来源时用的中性读数。早退路径（缺会话、缺 cwd、不在仓库、缺必填参数）用它：
+ * 为一句「没有 cwd」白付一趟 git 与持久面读不值得，那些失败的成因也和「绑在哪」无关。
+ */
+export const NO_ORIGIN: WorktreeOrigin = { kind: "none" };
+
+/**
+ * 读来源的结果：`problem` 非空时 `origin` 是中性读数，调用方应直接把 `problem` 当作失败原因报出去。
+ */
+export interface OriginRead {
+  readonly origin: WorktreeOrigin;
+  readonly problem: string | undefined;
 }
 
-/** 组装结果信封。把状态与说明拼在一起，避免每个调用点各写一遍。 */
-export function resultOf(state: BindingState, ok: boolean, detail: string): ToolResultValue {
-  return { ok, bound: state.bound, worktree: state.worktree, branch: state.branch, detail };
+/**
+ * 读某个会话的绑定来源（自己的登记 / 继承来的登记 / 没有）。
+ *
+ * 解析异常在这里收口。scope 域未装配或已释放时它抛的是**插件自己的装配状态**（内部文案是
+ * 「scope 域尚未装配」）：那句话与调用者正在做的事毫无关系，透给模型只会让它照着一句无法行动的
+ * 话去猜。所以对外只说「读不到绑定状态、稍后重试」，原因留给 logger —— 现场痕迹不丢，
+ * 模型也不会拿到内部装配文案。
+ *
+ * 不静默翻成「没有绑定」：那会把一次真实故障说成事实，而「看错地方」正是本插件最该避免的事。
+ */
+export async function readOrigin(deps: ToolsDeps, sessionId: string): Promise<OriginRead> {
+  try {
+    return { origin: await deps.scope.worktreeOrigin(sessionId), problem: undefined };
+  } catch (cause) {
+    deps.logger.warn(
+      "dsh-worktree-sidebar: 读取绑定来源失败 —— " +
+        (cause instanceof Error ? cause.message : String(cause)),
+    );
+    return {
+      origin: NO_ORIGIN,
+      problem:
+        "Could not read this session's binding state. Retry once the extension is fully loaded.",
+    };
+  }
+}
+
+/** 把来源翻成信封里的状态读数：继承态下 worktree / branch 取的是继承到的那条登记。 */
+export function stateOf(origin: WorktreeOrigin): BindingState {
+  if (origin.kind === "none") return { bound: false, worktree: "", branch: "" };
+  return { bound: true, worktree: origin.record.worktreeRoot, branch: origin.record.branch };
+}
+
+/**
+ * 组装结果信封。**继承来源说明只在这里加一次**：三个工具、每条成功与失败路径都经过它。
+ * 各调用点自己拼就一定会漏——漏掉之后模型读到的是「本会话没有绑定」，它会去重建一条
+ * 本已存在的登记（#847 的现场就是这样）。
+ */
+export function resultOf(origin: WorktreeOrigin, ok: boolean, detail: string): ToolResultValue {
+  const state = stateOf(origin);
+  const inherited =
+    origin.kind === "inherited"
+      ? "This root is inherited from session " +
+        origin.ownerSessionId +
+        "; this session has no binding of its own. "
+      : "";
+  return {
+    ok,
+    bound: state.bound,
+    worktree: state.worktree,
+    branch: state.branch,
+    detail: inherited + detail,
+  };
 }
 
 /**
@@ -58,6 +118,9 @@ export async function availableWorktrees(deps: ToolsDeps, repo: string): Promise
 /**
  * 落一条绑定。归属校验在这里做唯一一次——三个工具都经过它，
  * 所以「只允许绑定同一仓库的 worktree」这条不变量不会因为某条路径漏写而破。
+ *
+ * `before` 由调用方先解析好再递进来：调用方在更早的分支上就要用它（那几处失败路径也要报现状），
+ * 在这里重算一遍等于白付一趟 git 与持久面读。
  */
 export async function bindWorktree(
   deps: ToolsDeps,
@@ -65,8 +128,8 @@ export async function bindWorktree(
   repo: string,
   target: string,
   registeredAt: string,
+  before: WorktreeOrigin,
 ): Promise<ToolResultValue> {
-  const before = stateOf(deps, session.id);
   // 身份凭据缺席时拒绝落盘：没有它，这条登记在下一个进程里可能被一个同 id 的新会话继承，
   // 而那是「静默看错地方」——留一条不可核对的登记比不登记更危险。
   if (session.createdAt === undefined) {
@@ -107,9 +170,10 @@ export async function bindWorktree(
   if (!written.ok) {
     return resultOf(before, false, "Could not persist the binding: " + written.reason);
   }
-  const after = stateOf(deps, session.id);
+  // 成功路径的 after 就是刚写下的那条记录（own 态的定义如此），不必再解析一遍——
+  // 那会白付一趟 git 与持久面读，而结果只可能等价。
   return resultOf(
-    after,
+    { kind: "own", record },
     true,
     "Bound this session to the worktree." +
       " Open or refresh the right-sidebar Files tab to see it; the session cwd is unchanged," +
