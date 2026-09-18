@@ -48,8 +48,16 @@ const opt = (name) => {
   return i === -1 ? undefined : argv[i + 1];
 };
 
-function currentSegs() {
-  return expectedSegsFromConfFiles(readdirSync(CONF_DIR));
+/**
+ * 当前段集合；confDir 默认为仓库真实目录（CLI 只能对真仓求值），测试可注入临时目录。
+ * 目录不可读属环境故障：failClosed，不得抛未捕获异常（exit 1 会伪装成判红）。
+ */
+function currentSegs(confDir = CONF_DIR) {
+  try {
+    return expectedSegsFromConfFiles(readdirSync(confDir));
+  } catch (e) {
+    failClosed(`[ledger] 段目录不可读（${confDir}）：${String(e.message).split("\n")[0]}`);
+  }
 }
 
 /** 台账的段索引：测量值 ∪ 显式登记为「尚未测到」的段（两者共同构成「覆盖全部段」）。 */
@@ -192,20 +200,23 @@ function incompleteShardSegs(runId) {
   }
 }
 
-/** --check 模式：校验入库台账并打印覆盖统计。 */
-function runCheck() {
-  if (!existsSync(LEDGER_PATH)) {
-    failClosed(`[ledger] 台账不存在：${LEDGER_PATH}`);
+/**
+ * --check 模式：校验入库台账并打印覆盖统计。路径默认指向仓库真实文件（CLI 只能对真仓
+ * 求值），测试可注入临时路径；默认行为与原来逐字一致。
+ */
+export function runCheck({ ledgerPath = LEDGER_PATH, confDir = CONF_DIR } = {}) {
+  if (!existsSync(ledgerPath)) {
+    failClosed(`[ledger] 台账不存在：${ledgerPath}`);
   }
-  const problems = checkLedger(JSON.parse(readFileSync(LEDGER_PATH, "utf8")), currentSegs());
+  const ledger = readLedgerFile(ledgerPath);
+  const problems = checkLedger(ledger, currentSegs(confDir));
   for (const p of problems) console.error(`[ledger] ${p}`);
   if (problems.length > 0) {
     console.error(`[ledger] --check 失败：${problems.length} 项（拆段/加包后必须重测并更新台账）`);
     return 1;
   }
-  const ledger = JSON.parse(readFileSync(LEDGER_PATH, "utf8"));
   const { measured, unmeasured } = ledgerCoverage(ledger);
-  const cur = new Set(currentSegs());
+  const cur = new Set(currentSegs(confDir));
   const historical = [...measured].filter((s) => !cur.has(s));
   console.log(
     `[ledger] --check 通过：覆盖全部 ${cur.size} 段` +
@@ -213,6 +224,24 @@ function runCheck() {
       (historical.length > 0 ? `；历史段 ${historical.length} 条已在 superseded 登记取代关系` : ""),
   );
   return 0;
+}
+
+/**
+ * 读并解析台账文件；不可读/不可解析属环境故障：failClosed，不得抛未捕获异常。
+ * （此前 --check 路径读两次，此处收口为一次：合法文件行为逐字一致。）
+ */
+function readLedgerFile(ledgerPath) {
+  let text;
+  try {
+    text = readFileSync(ledgerPath, "utf8");
+  } catch (e) {
+    failClosed(`[ledger] 台账不可读（${ledgerPath}）：${String(e.message).split("\n")[0]}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    failClosed(`[ledger] 台账不可解析（${ledgerPath}）：${String(e.message).split("\n")[0]}`);
+  }
 }
 
 /** 生成模式的必填参数：缺失或取值非法返回 { error }（调用方 failClosed），成功返回 { args }。 */
@@ -293,7 +322,12 @@ function runGenerate() {
   const resolved = resolveRunArgs();
   if (resolved.error !== undefined) failClosed(resolved.error);
   const args = resolved.args;
-  const logText = readFileSync(args.fromLog, "utf8");
+  let logText;
+  try {
+    logText = readFileSync(args.fromLog, "utf8");
+  } catch (e) {
+    failClosed(`[ledger] 日志文件不可读（${args.fromLog}）：${String(e.message).split("\n")[0]}`);
+  }
   const parsed = parseSegmentLedger(logText);
   if (parsed.length === 0) {
     failClosed(
