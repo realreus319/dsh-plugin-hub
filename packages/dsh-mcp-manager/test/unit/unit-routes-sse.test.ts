@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * dsh-mcp-manager — unit：SSE 推送帧 / 健康检查 / 路由边界补齐。
  *
@@ -8,6 +7,7 @@
  * - events 路由：403 围栏 / 405 / writeHead 头 / 连接登记与 close 清理
  * - health 路由：403 / 405 / 计数聚合
  * - servers PATCH|DELETE 缺 name 400、未知 method 405
+ * - connect/disconnect/reconnect：405 + 403 围栏（#903 M-B5）
  * - session 路由：body 校验 400、cwd 切换 200
  * - import/json：缺 json 字段 400、同名 skip 与 overwrite 更新
  */
@@ -15,41 +15,60 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { assertNoGrowth, callHandler, pollUntil } from "../helpers.ts";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { McpManager as McpManagerType } from "../../src/server/connection/orchestrator/interface.ts";
+import type { McpMiddleware as McpMiddlewareType } from "../../src/server/connection/runtime/interface.ts";
+import type { MiddlewareHost } from "../../src/server/connection/runtime/deps.ts";
+import type { ProjectUnit } from "../../src/server/connection/runtime/interface.ts";
+import type { ServerConfig } from "../../src/server/config/interface.ts";
+import {
+  assertNoGrowth,
+  callHandler,
+  fakeManagerCtx,
+  fakeToolsService,
+  pollUntil,
+} from "../helpers.ts";
+import type { FakeResponseState } from "../helpers.ts";
 
-const {
-  makeRoutes,
-  makeEventsRoute,
-  makeHealthRoute,
-  sseData,
-  uiConfigChangedFrame,
-  broadcastFrame,
-  ROUTES,
-  McpStore,
-  McpManager,
-  normalizeServer,
-  SSE_HEARTBEAT_MS,
-  SSE_PING_FRAME,
-} = await import("../../src/index.ts");
+// S6-B2：路由装配/管理器构造/中间层是装配依赖 + sseData 无域门面，留包根；其余纯符号改道域门面。
+const { makeRoutes, makeEventsRoute, makeHealthRoute, sseData, McpManager, McpMiddleware } =
+  await import("../../src/index.ts");
+const { uiConfigChangedFrame, broadcastFrame, ROUTES, SSE_HEARTBEAT_MS, SSE_PING_FRAME } =
+  await import("../../src/server/api/interface.ts");
+const { McpStore } = await import("../../src/server/store/interface.ts");
+const { normalizeServer } = await import("../../src/server/config/interface.ts");
 
-const fakeReq = (method, url, body, opts = {}) => ({
-  method,
-  url,
-  socket: { remoteAddress: opts.remote ?? "127.0.0.1" },
-  headers: {
-    host: "localhost:3080",
-    origin: "http://localhost:3080",
-    "sec-fetch-site": "same-origin",
-  },
-  async *[Symbol.asyncIterator]() {
-    if (body !== undefined)
-      yield Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
-  },
-  on: () => {},
-});
+// 伪造 req/res：只实现 handler 实际读取的面，其余按接缝收窄（`as unknown as`）。
+const fakeReq = (
+  method: string,
+  url: string,
+  body?: unknown,
+  opts: { remote?: string } = {},
+): IncomingMessage =>
+  ({
+    method,
+    url,
+    socket: { remoteAddress: opts.remote ?? "127.0.0.1" },
+    headers: {
+      host: "localhost:3080",
+      origin: "http://localhost:3080",
+      "sec-fetch-site": "same-origin",
+    },
+    async *[Symbol.asyncIterator]() {
+      if (body !== undefined)
+        yield Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
+    },
+    on: () => {},
+  }) as unknown as IncomingMessage;
 
-const fakeRes = () => {
-  const state = { status: 200, body: "", headers: {}, destroyed: false, writableEnded: false };
+const fakeRes = (): ServerResponse & { state: FakeResponseState } => {
+  const state: FakeResponseState = {
+    status: 200,
+    body: "",
+    headers: {},
+    destroyed: false,
+    writableEnded: false,
+  };
   return {
     state,
     // routes.ts 心跳回调读 res.destroyed / res.writableEnded 判定自愈清理。
@@ -59,25 +78,25 @@ const fakeRes = () => {
     get writableEnded() {
       return state.writableEnded;
     },
-    writeHead: (s, h) => {
+    writeHead: (s: number, h?: Record<string, string>) => {
       state.status = s;
       state.headers = h ?? {};
     },
-    write: (chunk) => {
+    write: (chunk: { toString(): string }) => {
       state.body += chunk.toString();
     },
-    end: (chunk) => {
+    end: (chunk?: { toString(): string }) => {
       if (chunk) state.body += chunk.toString();
       state.writableEnded = true;
     },
     setHeader: () => {},
-    on: (event, cb) => {
+    on: (event: string, cb: () => void) => {
       if (event === "close") state.onClose = cb;
     },
     destroy: () => {
       state.destroyed = true;
     },
-  };
+  } as unknown as ServerResponse & { state: FakeResponseState };
 };
 
 function setup() {
@@ -86,17 +105,14 @@ function setup() {
   const store = new McpStore(join(dir, "mcp.json"));
   store.data = { version: 1, servers: [] };
   store.upsert(normalizeServer({ name: "dup-a", transport: "stdio", command: "echo" }));
-  const manager = new McpManager(
-    { logger: { warn: () => {}, info: () => {}, error: () => {} } },
-    store,
-  );
+  const manager = new McpManager(fakeManagerCtx(), store);
   manager.catalogCache.set("cached", { summary: "s" });
   managers.push(manager);
   return { dir, store, manager };
 }
 
-let tempDirs = [];
-let managers = [];
+let tempDirs: string[] = [];
+let managers: McpManagerType[] = [];
 
 afterEach(() => {
   for (const manager of managers) {
@@ -111,7 +127,8 @@ afterEach(() => {
   tempDirs = [];
 });
 
-const countPing = (res) => (res.state.body.match(/data: \{"type":"ping"\}/g) ?? []).length;
+const countPing = (res: { state: { body: string } }) =>
+  (res.state.body.match(/data: \{"type":"ping"\}/g) ?? []).length;
 
 describe("帧格式", () => {
   it("sseData 产出 data 帧", () => {
@@ -125,15 +142,16 @@ describe("帧格式", () => {
 
 describe("broadcastFrame", () => {
   function broadcastFixture() {
-    const written = [];
+    const written: [string, unknown][] = [];
     const boom = {
       write: () => {
         throw new Error("EPIPE");
       },
     };
-    const good1 = { write: (f) => written.push(["g1", f]) };
-    const good2 = { write: (f) => written.push(["g2", f]) };
-    return { written, conns: new Set([boom, good1, good2]) };
+    const good1 = { write: (f: unknown) => written.push(["g1", f]) };
+    const good2 = { write: (f: unknown) => written.push(["g2", f]) };
+    // 部分连接桩（只有 write 面）：broadcastFrame 只调 write，按接缝收窄。
+    return { written, conns: new Set([boom, good1, good2]) as unknown as Set<ServerResponse> };
   }
 
   it("空集合广播不抛", () => {
@@ -168,9 +186,10 @@ describe("events 路由", () => {
     const res = fakeRes();
     route.handler(fakeReq("GET", ROUTES.events), res);
     let frames = 0;
-    res.write = () => {
+    // 帧计数覆盖 write：签名按 node 面收窄（只用零参调用形态）。
+    res.write = (() => {
       frames += 1;
-    };
+    }) as unknown as typeof res.write;
     const unsubscribe = manager.onStatus(() => {
       manager.sseHub?.broadcast(sseData({ type: "summary" }));
     });
@@ -224,13 +243,13 @@ describe("events 路由", () => {
   it("close 后注销", async () => {
     const { manager, res } = await broadcastFlow();
     // close 注销。
-    res.state.onClose();
+    res.state.onClose!();
     expect(manager.sseHub?.size()).toBe(0);
   });
 
   it("close 注销后广播不再写帧", async () => {
     const { manager, res, frames, unsubscribe } = await broadcastFlow();
-    res.state.onClose();
+    res.state.onClose!();
     // 二次广播应执行但不再写帧（连接已注销）——哨兵确认广播落定后断言帧数不变。
     let landed = 0;
     const offSentinel = manager.onStatus(() => {
@@ -273,7 +292,7 @@ describe("SSE 心跳：登记 / close 清理", () => {
 
   it("close 后注销", () => {
     const { manager, res } = heartbeatFixture();
-    res.state.onClose();
+    res.state.onClose!();
     expect(manager.sseHub?.size()).toBe(0);
   });
 
@@ -283,7 +302,7 @@ describe("SSE 心跳：登记 / close 清理", () => {
     await pollUntil("心跳 data ping 帧到达", () => countPing(res) >= 1);
     const pingsAtClose = countPing(res);
     // close：hub 内部 evict（出表 + 停对该连接写心跳），此后不再有新帧。
-    res.state.onClose();
+    res.state.onClose!();
     await assertNoGrowth("close 后心跳停止", () => countPing(res), pingsAtClose);
     expect(countPing(res)).toBe(pingsAtClose);
   });
@@ -356,24 +375,32 @@ describe("health 路由", () => {
   function healthFixture() {
     const { manager } = setup();
     const route = makeHealthRoute(manager);
-    manager.supervisors.set("a", { status: "connected", tools: ["t1", "t2"] });
-    manager.supervisors.set("b", { status: "failed", tools: [] });
-    // 中间层连接池计数（#228）：项目级连接不在 supervisors，health 单独投影。
-    manager.middlewareMode = "project";
+    // 单池（#767 笔 1a）：/health 的顶层三计数与 middleware 子对象都按**连接池单元表**
+    // 聚合——旧直连账本（manager.supervisors）已整体退役。假池只回答「routes 是否经
+    // statusOf / toolCountOf 取数」这一条；读时刷新的真实语义由下面两条真 McpMiddleware
+    // 用例钉住。
+    const units = new Map([
+      [
+        "/root-a",
+        {
+          root: "/root-a",
+          connections: new Map([
+            ["x", { status: "connected" }],
+            ["y", { status: "failed" }],
+          ]),
+        },
+      ],
+      ["/root-b", { root: "/root-b", connections: new Map() }],
+    ]);
+    const toolCounts = new Map([["/root-a\u0000x", 2]]);
+    // 假池只回答「routes 是否经 statusOf / toolCountOf 取数」：按既有注释的意图收窄为端口面。
     manager.middleware = {
-      units: new Map([
-        [
-          "/root-a",
-          {
-            connections: new Map([
-              ["x", { status: "connected" }],
-              ["y", { status: "failed" }],
-            ]),
-          },
-        ],
-        ["/root-b", { connections: new Map() }],
-      ]),
-    };
+      units: units as unknown as Map<string, ProjectUnit>,
+      statusOf: (root: string, serverName: string) =>
+        units.get(root)?.connections.get(serverName)?.status,
+      toolCountOf: (root: string, serverName: string) =>
+        toolCounts.get(root + "\u0000" + serverName) ?? 0,
+    } as unknown as McpMiddlewareType;
     return { manager, route };
   }
 
@@ -435,7 +462,128 @@ describe("health 路由", () => {
 
   it("health 补中间层连接计数", () => {
     const { payload } = healthPayload();
-    expect(payload.middleware).toEqual({ mode: "project", units: 2, connections: 2, connected: 1 });
+    // #767 笔 2：middleware 子对象只剩三个计数键——模式键已随 `middleware` 配置键删除。
+    expect(payload.middleware).toEqual({ units: 2, connections: 2, connected: 1 });
+    expect("mode" in payload.middleware).toBe(false);
+    expect(payload.middleware.units).toBe(2);
+  });
+
+  /** health 的计数判据必须打在真 statusOf 上：假池只能验「接线到没到」，验不了读时刷新。 */
+  function realPoolHost(tools: unknown, servers: ServerConfig[]) {
+    return {
+      ctx: { tools },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      projectServersFor: async () => servers,
+      globalServers: () => [],
+      normalizedProjectRoot: async (cwd: string | undefined) => cwd,
+      saveUserState: async () => {},
+      emitStatus: () => {},
+      catalogCachePath: () => "/tmp/cache.json",
+      isGlobalServer: () => false,
+      isRuntimeServer: () => false,
+    };
+  }
+
+  it("#767 S1-4d：计数随注册面变化（前缀工具消失 → middleware.connected 下降）", () => {
+    // 真池（真 McpMiddleware + 真 projectServerState）：官方不暴露状态 API，六态只能读注册面，
+    // 而 entry.status 只在装载窗口结算时写入——routes 若直读它会永远停在陈旧的 connected。
+    const { manager, route } = healthFixture();
+    const servers: ServerConfig[] = [
+      { name: "x", transport: "stdio", command: "echo", enabled: true },
+    ];
+    const tools = fakeToolsService({ schemas: [{ name: "mcp__id-x__t" }] });
+    // 真池 + 部分宿主：ctx/tools 等面只给池实际触达的形状，按接缝收窄。
+    const mw = new McpMiddleware(realPoolHost(tools, servers) as unknown as MiddlewareHost);
+    mw.units.set("/root-a", {
+      root: "/root-a",
+      connections: new Map([
+        [
+          "x",
+          {
+            server: servers[0],
+            id: "id-x",
+            handle: { disposed: false },
+            status: "connected",
+            error: undefined,
+            connectedAt: Date.now(),
+            readySettled: true,
+            everConnected: true,
+            disposed: false,
+          },
+        ],
+      ]),
+      catalog: new Map(),
+      userDisabled: new Set(),
+      lastTouchedAt: Date.now(),
+      inFlight: new Map(),
+      // 单元桩带域外探测字段（catalog/everConnected/disposed）：只供本文件判据，按接缝收窄。
+    } as unknown as ProjectUnit);
+    manager.middleware = mw;
+    const middlewarePayload = () => {
+      const res = fakeRes();
+      route.handler(fakeReq("GET", ROUTES.health), res);
+      return JSON.parse(res.state.body).middleware;
+    };
+    expect(middlewarePayload()).toEqual({
+      units: 1,
+      connections: 1,
+      connected: 1,
+    });
+    // 注册面里该 id 前缀的工具消失（官方退避/预算耗尽时注销工具）→ 下一读计为未连接。
+    tools.entries = [{ name: "mcp__other-id__t" }];
+    expect(middlewarePayload().connected).toBe(0);
+    expect(middlewarePayload().connections).toBe(1);
+  });
+
+  it("#767 S1-4d：虚拟单元（toolDefinitions）在 /health 恒计为 connected", () => {
+    // 虚拟连接从不挂官方实例、注册面永远没有它的前缀——若 /health 也按注册面判，它会恒计为
+    // 未连接（同一份 statusOf 的第三处读点；另两处见 unit-middleware 与 unit-manager2）。
+    const { manager, route } = healthFixture();
+    const virtual: ServerConfig = {
+      name: "cg",
+      transport: "stdio",
+      command: "codegraph",
+      enabled: true,
+      toolDefinitions: [],
+    };
+    const tools = fakeToolsService();
+    const mw = new McpMiddleware(realPoolHost(tools, [virtual]) as unknown as MiddlewareHost);
+    mw.units.set("/root-a", {
+      root: "/root-a",
+      connections: new Map([
+        [
+          "cg",
+          {
+            server: virtual,
+            id: undefined,
+            handle: undefined,
+            status: "connected",
+            error: undefined,
+            connectedAt: Date.now(),
+            readySettled: true,
+            everConnected: true,
+            disposed: false,
+          },
+        ],
+      ]),
+      catalog: new Map(),
+      userDisabled: new Set(),
+      lastTouchedAt: Date.now(),
+      inFlight: new Map(),
+      // 单元桩带域外探测字段（catalog/everConnected/disposed）：只供本文件判据，按接缝收窄。
+    } as unknown as ProjectUnit);
+    manager.middleware = mw;
+    const middlewarePayload = () => {
+      const res = fakeRes();
+      route.handler(fakeReq("GET", ROUTES.health), res);
+      return JSON.parse(res.state.body).middleware;
+    };
+    expect(tools.entries).toEqual([]);
+    expect(middlewarePayload().connected).toBe(1);
+    // 用户禁用（浮窗断开）是把它投影成 disabled 的输入面之一。
+    mw.units.get("/root-a")!.userDisabled.add("cg");
+    expect(middlewarePayload().connected).toBe(0);
+    expect(middlewarePayload().connections).toBe(1);
   });
 });
 
@@ -443,7 +591,8 @@ describe("session / servers 边界", () => {
   function routesFixture() {
     const { manager } = setup();
     const routes = makeRoutes(manager);
-    return { manager, routes, find: (path) => routes.find((r) => r.path === path) };
+    // 路由表静态装配：缺路由即装配损坏，此处断言存在（缺失时抛 TypeError 判红）。
+    return { manager, routes, find: (path: string) => routes.find((r) => r.path === path)! };
   }
 
   it("session 非 POST 405", async () => {
@@ -500,7 +649,7 @@ describe("session / servers 边界", () => {
       find(ROUTES.servers),
       fakeReq("DELETE", `${ROUTES.servers}?name=dup-a`),
     );
-    expect(resDel.payload.ok).toBe(true);
+    expect((resDel.payload as { ok: unknown }).ok).toBe(true);
   });
 
   it("PATCH 不存在的服务器 → 400", async () => {
@@ -522,11 +671,43 @@ describe("session / servers 边界", () => {
   });
 });
 
+describe("connect/disconnect/reconnect 围栏（#903 M-B5）", () => {
+  function routesFixture() {
+    const { manager } = setup();
+    const routes = makeRoutes(manager);
+    return { manager, routes, find: (path: string) => routes.find((r) => r.path === path)! };
+  }
+
+  // 三路由 guarded 均为 POST（shared/routes.ts ROUTE_FENCE）：非 POST 一律 405。
+  it.each([[ROUTES.connect], [ROUTES.disconnect], [ROUTES.reconnect]])(
+    "%s 非 POST → 405",
+    async (path) => {
+      const { find } = routesFixture();
+      const res = await callHandler(find(path), fakeReq("GET", path));
+      expect(res.status).toBe(405);
+    },
+  );
+
+  // loopback 围栏先于方法分流之外的动作：三路由非回环一律 403。
+  it.each([[ROUTES.connect], [ROUTES.disconnect], [ROUTES.reconnect]])(
+    "%s 非 loopback → 403",
+    async (path) => {
+      const { find } = routesFixture();
+      const res = await callHandler(
+        find(path),
+        fakeReq("POST", path, undefined, { remote: "8.8.8.8" }),
+      );
+      expect(res.status).toBe(403);
+    },
+  );
+});
+
 describe("import/json：字段校验与 skip/overwrite", () => {
   function importFixture() {
     const { manager } = setup();
     const routes = makeRoutes(manager);
-    const importRoute = routes.find((r) => r.path === ROUTES.importJson);
+    // 路由表静态装配：缺路由即装配损坏，此处断言存在。
+    const importRoute = routes.find((r) => r.path === ROUTES.importJson)!;
     return { manager, importRoute };
   }
 
@@ -561,7 +742,7 @@ describe("import/json：字段校验与 skip/overwrite", () => {
       importRoute,
       fakeReq("POST", ROUTES.importJson, { json: payload }),
     );
-    expect(resSkip.payload.skipped).toEqual(["dup-a"]);
+    expect((resSkip.payload as { skipped: unknown }).skipped).toEqual(["dup-a"]);
   });
 
   it("新名导入", async () => {
@@ -571,7 +752,7 @@ describe("import/json：字段校验与 skip/overwrite", () => {
       importRoute,
       fakeReq("POST", ROUTES.importJson, { json: payload }),
     );
-    expect(resSkip.payload.imported).toEqual(["fresh"]);
+    expect((resSkip.payload as { imported: unknown }).imported).toEqual(["fresh"]);
   });
 
   it("overwrite 全部导入", async () => {
@@ -581,7 +762,10 @@ describe("import/json：字段校验与 skip/overwrite", () => {
       importRoute,
       fakeReq("POST", ROUTES.importJson, { json: payload, overwrite: true }),
     );
-    expect(resOverwrite.payload.imported.sort()).toEqual(["dup-a", "fresh"]);
+    expect((resOverwrite.payload as { imported: string[] }).imported.sort()).toEqual([
+      "dup-a",
+      "fresh",
+    ]);
   });
 
   it("overwrite 后配置更新", async () => {
@@ -591,7 +775,7 @@ describe("import/json：字段校验与 skip/overwrite", () => {
       importRoute,
       fakeReq("POST", ROUTES.importJson, { json: payload, overwrite: true }),
     );
-    expect(manager.store.find("dup-a").command).toBe("echo2");
+    expect(manager.store.find("dup-a")!.command).toBe("echo2");
   });
 
   it("非法条目整体 400", async () => {
@@ -613,26 +797,24 @@ describe("import/json：字段校验与 skip/overwrite", () => {
   });
 });
 
-// B7：POST /config 非法 middleware → 400 拒绝（不热切换、不落盘） ----
-describe("B7：POST /config 非法 middleware → 400 拒绝", () => {
+// M7：POST /config 未知顶层键 → 400 拒绝（且不落盘） ----
+describe("M7：POST /config 未知顶层键 → 400 拒绝", () => {
   function configFixture() {
     const { manager } = setup();
-    const uiUpdates = [];
+    const uiUpdates: unknown[] = [];
     manager.uiUpdate = async (patch) => {
-      // 记录落盘意图：非法值不得触达（现状会落盘 {middleware:"off"}）
-      uiUpdates.push(String(patch.middleware));
+      // 记录落盘意图：未知键不得触达 uiUpdate（知道错了就不许写）。
+      uiUpdates.push(patch);
     };
     const routes = makeRoutes(manager);
-    const configRoute = routes.find((r) => r.path === ROUTES.config);
+    // 路由表静态装配：缺路由即装配损坏，此处断言存在。
+    const configRoute = routes.find((r) => r.path === ROUTES.config)!;
     return { manager, configRoute, uiUpdates };
   }
 
-  async function postBogus() {
+  async function postBody(body: unknown) {
     const fixture = configFixture();
-    const res = await callHandler(
-      fixture.configRoute,
-      fakeReq("POST", ROUTES.config, { middleware: "bogus" }),
-    );
+    const res = await callHandler(fixture.configRoute, fakeReq("POST", ROUTES.config, body));
     return { ...fixture, res };
   }
 
@@ -641,23 +823,118 @@ describe("B7：POST /config 非法 middleware → 400 拒绝", () => {
     expect(configRoute).toBeTruthy();
   });
 
-  it("B7：非法 middleware 应 400 拒绝（现状静默回落 off 并落盘）", async () => {
-    const { res } = await postBogus();
+  it("M7：未知顶层键应 400 拒绝", async () => {
+    const { res } = await postBody({ middleware: "all" });
     expect(res.status).toBe(400);
   });
 
-  it("错误文案指明 middleware 非法", async () => {
-    const { res } = await postBogus();
-    expect(res.payload.error).toMatch(/middleware/);
+  it("M7：已删配置键 middleware / middlewarePolicy 一律按未知键拒绝", async () => {
+    const mw = await postBody({ middleware: "project" });
+    expect(mw.res.status).toBe(400);
+    const policy = await postBody({ middlewarePolicy: { denyTools: {} } });
+    expect(policy.res.status).toBe(400);
   });
 
-  it("非法值不改写运行模式", async () => {
-    const { manager } = await postBogus();
-    expect(manager.middlewareMode).toBe("off");
+  it("错误文案列出全部未知键", async () => {
+    const { res } = await postBody({ foo: 1, middleware: "all" });
+    expect((res.payload as { error: unknown }).error).toBe(
+      "unknown config key(s): foo, middleware",
+    );
   });
 
-  it("非法值不触达 uiUpdate（不落盘）", async () => {
-    const { uiUpdates } = await postBogus();
+  it("未知键不触达 uiUpdate（不落盘）", async () => {
+    const { uiUpdates } = await postBody({ middleware: "all" });
     expect(uiUpdates.length).toBe(0);
+  });
+
+  it("manager 上没有模式镜像字段（无第二事实源可写）", () => {
+    const { manager } = configFixture();
+    expect("middlewareMode" in manager).toBe(false);
+    expect("setMiddlewareMode" in manager).toBe(false);
+  });
+
+  it("合法扁平 UI 键 → 200 并落盘", async () => {
+    const { res, uiUpdates } = await postBody({ position: "top-left", offsetX: 12 });
+    expect(res.status).toBe(200);
+    expect(uiUpdates.length).toBe(1);
+  });
+});
+// CRAP-ZERO tool-disable 路由：分支覆盖（与 routes-controllers 解析拆分同批）
+describe("CRAP-ZERO tool-disable 路由", () => {
+  function toolFixture() {
+    const { manager } = setup();
+    const routes = makeRoutes(manager);
+    const route = routes.find((r) => r.path === ROUTES.toolDisable)!;
+    return { manager, route };
+  }
+
+  it("非 PATCH → 405", async () => {
+    const { route } = toolFixture();
+    const res = await callHandler(route, fakeReq("GET", ROUTES.toolDisable));
+    expect(res.status).toBe(405);
+  });
+
+  it("无 body → 400", async () => {
+    const { route } = toolFixture();
+    const res = await callHandler(route, fakeReq("PATCH", ROUTES.toolDisable));
+    expect(res.status).toBe(400);
+  });
+
+  it("body 缺字段 → 400 且文案含均为必填", async () => {
+    const { route } = toolFixture();
+    const res = await callHandler(route, fakeReq("PATCH", ROUTES.toolDisable, {}));
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.payload)).toMatch(/均为必填/);
+  });
+
+  it("server 格式非法 → 400", async () => {
+    const { route } = toolFixture();
+    const res = await callHandler(
+      route,
+      fakeReq("PATCH", ROUTES.toolDisable, { server: "nope", tool: "t" }),
+    );
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.payload)).toMatch(/格式非法/);
+  });
+
+  it("跨空间 root → 400 且文案含不属于当前工作空间", async () => {
+    const { route } = toolFixture();
+    const res = await callHandler(
+      route,
+      fakeReq("PATCH", ROUTES.toolDisable, { server: "@/tmp/proj/x", tool: "t" }),
+    );
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.payload)).toMatch(/不属于当前工作空间/);
+  });
+
+  it("合法禁用 → 200 且透传 root/裸名/开关", async () => {
+    const { manager, route } = toolFixture();
+    const calls: Array<[string, string, string, boolean]> = [];
+    manager.setToolDisabled = (async (
+      root: string,
+      server: string,
+      tool: string,
+      disabled: boolean,
+    ) => {
+      calls.push([root, server, tool, disabled]);
+    }) as typeof manager.setToolDisabled;
+    const res = await callHandler(
+      route,
+      fakeReq("PATCH", ROUTES.toolDisable, { server: "@global/dup-a", tool: "t", disabled: true }),
+    );
+    expect(res.status).toBe(200);
+    expect((res.payload as { ok: unknown }).ok).toBe(true);
+    expect(calls).toEqual([["@global", "dup-a", "t", true]]);
+  });
+});
+// CRAP-ZERO resume route hit
+describe("CRAP-ZERO resume route", () => {
+  it("POST resume returns 200 ok", async () => {
+    const { manager } = setup();
+    const routes = makeRoutes(manager);
+    const route = routes.find((r) => r.path === ROUTES.resume)!;
+    const res = await callHandler(route, fakeReq("POST", ROUTES.resume));
+    expect(res.status).toBe(200);
+    expect((res.payload as { ok: unknown }).ok).toBe(true);
   });
 });

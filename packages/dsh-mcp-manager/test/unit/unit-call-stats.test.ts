@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * dsh-mcp-manager — unit：McpStatsCollector 全形态 + 配置域接线。
  *
@@ -15,15 +14,18 @@
  * - 配置守护：updateUiConfig 不抹除既有 debug 配置
  * - B2（修复红测）：configure({enabled:false}) 关闭前最后一批脏数据必须刷盘
  */
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { fakeManagerCtx } from "../helpers.ts";
 
-const { McpStatsCollector, McpManager, McpStore, resolveDebugConfig } =
-  await import("../../src/index.ts");
+// S6-B2：McpManager 构造取端口 + resolveDebugConfig 组合根定义，留包根；纯符号改道域门面。
+const { McpManager, resolveDebugConfig } = await import("../../src/index.ts");
+const { McpStatsCollector } = await import("../../src/server/stats/interface.ts");
+const { McpStore } = await import("../../src/server/store/interface.ts");
 
-let tempDirs = [];
+let tempDirs: string[] = [];
 
 function tempDir() {
   const dir = mkdtempSync(join(tmpdir(), "mcp-stats-test-"));
@@ -90,7 +92,7 @@ describe("开启时正确聚合调用与渐进式披露指标并原子落盘", (
     return { statsFile, collector };
   }
 
-  function rawOf(statsFile) {
+  function rawOf(statsFile: string) {
     return JSON.parse(readFileSync(statsFile, "utf8"));
   }
 
@@ -222,7 +224,7 @@ describe("前端 POST /config 不会覆盖抹除已有的 debug 配置", () => {
   async function updateUiOnly() {
     const dir = tempDir();
     const store = new McpStore(join(dir, "mcp.json"));
-    const manager = new McpManager({ logger: { info: () => {}, warn: () => {} } }, store);
+    const manager = new McpManager(fakeManagerCtx(), store);
 
     let persistedSettings = {
       ui: { position: "top-right", offset: { x: 8, y: 8, blankY: 40 }, zIndexBase: 10 },
@@ -292,5 +294,20 @@ describe("B2：configure({enabled:false}) 关闭前最后一批脏数据必须�
     const { statsFile } = configureOffFixture();
     const raw = JSON.parse(readFileSync(statsFile, "utf8"));
     expect(raw.servers.codegraph.totalCalls).toBe(1);
+  });
+});
+
+// #903 crash 残留 tmp：flush 失败必须清理临时名 ----
+describe("flush 失败清理（#903）", () => {
+  it("落盘目标被目录占住 → 失败只记日志且无 tmp 残留", () => {
+    const dir = tempDir();
+    // filePath 本身是已存在目录：tmp 写得进去，rename 覆盖不了它。
+    const victim = join(dir, "victim");
+    mkdirSync(victim);
+    const collector = new McpStatsCollector({ enabled: true, filePath: victim });
+    collector.recordCall("s", "t", 10, true);
+    collector.flushSync();
+    const leftovers = readdirSync(dir).filter((name) => name.includes(".tmp."));
+    expect(leftovers).toEqual([]);
   });
 });

@@ -1,24 +1,35 @@
-// @ts-nocheck
 /**
  * dsh-mcp-manager — unit：McpStore 持久化全分支 + mcpServers JSON 导入。
  *
  * 覆盖：
  * - McpStore.load：文件不存在重置内存态、损坏 JSON 保持内存态并推进基线、
- *   servers 非 Array 不覆盖
- * - McpStore.save：目录缺失递归创建（两层缺失区分 recursive 语义）、原子写、mtime 基线
- * - changedOnDisk / reloadIfChanged：无基线、外部修改、文件删除
+ *   解析成功但缺 servers/形态不对重置为空（#903 M3-store；损坏仍保持，两者区分）
+ * - McpStore.save：目录缺失递归创建（两层缺失区分 recursive 语义）、原子写、mtime 基线、
+ *   同路径串行 + 唯一 tmp 名（#903 M-store）、写前冲突 fail-closed（#903 M3-store 反写）
+ * - changedOnDisk / reloadIfChanged：无基线、外部修改、文件删除、同毫秒改内容（全文快照）
  * - find / upsert（替换不追加）/ remove（未知名 no-op）
  * - fromClaudeEntry / parseClaudeJson：http/sse/stdio 全分支与错误路径
  */
-import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  utimesSync,
+  statSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-const { McpStore, fromClaudeEntry, parseClaudeJson } = await import("../../src/index.ts");
+// I8 导入面收窄：store/config 两域门面直引，不再经包根组合根。
+const { McpStore } = await import("../../src/server/store/interface.ts");
+const { fromClaudeEntry, parseClaudeJson } = await import("../../src/server/config/interface.ts");
 
-let tempDirs = [];
+let tempDirs: string[] = [];
 
 function tempDir() {
   const dir = mkdtempSync(join(tmpdir(), "dsh-mcp-store-"));
@@ -146,25 +157,27 @@ describe("load：正常读取 + mtime 基线", () => {
   });
 });
 
-describe("load：servers 非 Array → 不覆盖内存 servers", () => {
-  async function loadInvalidServers() {
+describe("load：解析成功但缺 servers/形态不对 → 重置为空（#903 M3-store）", () => {
+  // 旧口径静默保留内存旧值：已删配置会在下次读盘复活。损坏 JSON 仍保持内存态
+  // （下一分组），两者区分处理。
+  async function loadInvalidServers(payload: string) {
     const dir = tempDir();
     const path = join(dir, "mcp.json");
-    writeFileSync(path, JSON.stringify({ version: 1, servers: "nope" }));
+    writeFileSync(path, payload);
     const store = new McpStore(path);
     store.data.servers.push({ name: "keep", transport: "stdio", command: "x" });
     await store.load();
     return store;
   }
 
-  it("非法 servers 应保留内存态", async () => {
-    const store = await loadInvalidServers();
-    expect(store.data.servers.length).toBe(1);
+  it("servers 非 Array → 重置为空", async () => {
+    const store = await loadInvalidServers(JSON.stringify({ version: 1, servers: "nope" }));
+    expect(store.data.servers.length).toBe(0);
   });
 
-  it("保留的内存态内容不变", async () => {
-    const store = await loadInvalidServers();
-    expect(store.data.servers[0].name).toBe("keep");
+  it("缺 servers 键（{}）→ 重置为空", async () => {
+    const store = await loadInvalidServers(JSON.stringify({ version: 1 }));
+    expect(store.data.servers.length).toBe(0);
   });
 });
 
@@ -212,7 +225,7 @@ describe("save：目录两层缺失 → recursive 创建；原子写 + 基线更
 
   it("save 更新 mtime 基线", async () => {
     const { store } = await savedFixture();
-    expect(store.mtimeMs > 0).toBeTruthy();
+    expect(store.mtimeMs! > 0).toBeTruthy();
   });
 
   it("save 后 changedOnDisk 为 false", async () => {
@@ -269,12 +282,12 @@ describe("find / upsert / remove", () => {
 
   it("upsert 已有名替换为新值", () => {
     const store = withServers();
-    expect(store.find("a").command).toBe("3");
+    expect(store.find("a")!.command).toBe("3");
   });
 
   it("upsert 其它名保持原值", () => {
     const store = withServers();
-    expect(store.find("b").command).toBe("2");
+    expect(store.find("b")!.command).toBe("2");
   });
 
   it("remove 未知名 no-op", () => {
@@ -487,15 +500,111 @@ describe("B17：save 失败时 tmp 残留必须清理", () => {
     await expect(store.save()).rejects.toThrow(/EISDIR|ENOTEMPTY|EEXIST|EPERM|ENOTDIR/);
   });
 
-  it("B17：save 失败后 tmp 残留应清理（现状固定名 tmp 残留）", async () => {
+  it("B17：save 失败后真名 tmp 残留应清理（#903 M-store：旧断言查从未创建过的名字，空转）", async () => {
     const { victimPath, store } = victimFixture();
+    const dir = victimPath.slice(0, victimPath.lastIndexOf("/"));
     await store.save().catch(() => {});
-    expect(existsSync(`${victimPath}.tmp`)).toBe(false);
+    // 真残留名前缀 = <path>.tmp.（pid.时间戳[.随机].tmp）：目录枚举断言，而非查固定名。
+    const leftovers = readdirSync(dir).filter((name) => name.startsWith("victim.tmp."));
+    expect(leftovers).toEqual([]);
+  });
+});
+
+// #903 M-store/M3-store：串行 save + 同毫秒检出 + 写前冲突 fail-closed ----
+describe("save 串行与冲突（#903）", () => {
+  function twoStoresSamePath() {
+    const dir = tempDir();
+    const path = join(dir, "mcp.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1, servers: [{ name: "a", transport: "stdio", command: "echo" }] }),
+    );
+    return { dir, path };
+  }
+
+  it("同实例并发双 save 都成功且内容正确", async () => {
+    const { path } = twoStoresSamePath();
+    const store = new McpStore(path);
+    await store.load();
+    store.upsert({ name: "b", transport: "stdio", command: "x" });
+    await Promise.all([store.save(), store.save()]);
+    expect(
+      JSON.parse(await readFile(path, "utf8"))
+        .servers.map((s: { name: string }) => s.name)
+        .sort(),
+    ).toEqual(["a", "b"]);
   });
 
-  it("B17：pid 后缀残留同样不应存在", async () => {
-    const { victimPath, store } = victimFixture();
-    await store.save().catch(() => {});
-    expect(existsSync(`${victimPath}.tmp.`)).toBe(false);
+  it("同毫秒改内容 → changedOnDisk true（全文快照第二道锁）", async () => {
+    const { path } = twoStoresSamePath();
+    const store = new McpStore(path);
+    await store.load();
+    const base = statSync(path);
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1, servers: [{ name: "c", transport: "stdio", command: "y" }] }),
+    );
+    // 把 mtime 压回基线：纯 mtime 口径会漏检，快照必须兜住。
+    utimesSync(path, base.atime, base.mtime);
+    expect(await store.changedOnDisk()).toBe(true);
+  });
+
+  it("外部变更后 save fail-closed 抛错（不静默覆盖）", async () => {
+    const { path } = twoStoresSamePath();
+    const store = new McpStore(path);
+    await store.load();
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1, servers: [{ name: "ext", transport: "stdio", command: "z" }] }),
+    );
+    store.upsert({ name: "mine", transport: "stdio", command: "m" });
+    await expect(store.save()).rejects.toThrow(/外部被修改/);
+    // 外部内容原样保留：
+    expect(JSON.parse(await readFile(path, "utf8")).servers[0].name).toBe("ext");
+  });
+
+  it("reload 后 save 不再冲突", async () => {
+    const { path } = twoStoresSamePath();
+    const store = new McpStore(path);
+    await store.load();
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1, servers: [{ name: "ext", transport: "stdio", command: "z" }] }),
+    );
+    await store.reloadIfChanged();
+    store.upsert({ name: "mine", transport: "stdio", command: "m" });
+    await store.save();
+    expect(
+      JSON.parse(await readFile(path, "utf8"))
+        .servers.map((s: { name: string }) => s.name)
+        .sort(),
+    ).toEqual(["ext", "mine"]);
+  });
+});
+
+// S2-b：save 取 mode 表 + 显式路径回落（既有文件内加判据，不新增文件） ----
+describe("S2-b：save 取 mode 表 + 显式路径回落", () => {
+  it("显式任意路径 save 照常写盘且 mode 0o600（锁住回落兼容）", async () => {
+    const dir = tempDir();
+    // 不在 mode 登记表的任意路径（用户 storePath 显式接管）：回落既有 0o600。
+    const path = join(dir, "custom-arbitrary.json");
+    const store = new McpStore(path);
+    store.upsert({ name: "s", transport: "stdio", command: "echo" });
+    await store.save();
+    expect(existsSync(path)).toBe(true);
+    expect(JSON.parse(await readFile(path, "utf8")).servers[0].name).toBe("s");
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("项目级新形态路径 save 落 null 口径（file-io 层已覆盖 null 写面，此处只锁登记 + 落盘成功）", async () => {
+    const { projectConfigFile, fileMode } = await import("../../src/server/shared/interface.ts");
+    const dir = tempDir();
+    const projPath = projectConfigFile(join(dir, "proj"));
+    expect(fileMode(projPath)).toBeNull();
+    const store = new McpStore(projPath);
+    store.upsert({ name: "p", transport: "stdio", command: "echo" });
+    await store.save();
+    expect(existsSync(projPath)).toBe(true);
+    expect(JSON.parse(await readFile(projPath, "utf8")).servers[0].name).toBe("p");
   });
 });

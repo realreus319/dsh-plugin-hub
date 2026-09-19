@@ -62,7 +62,7 @@ worktree 内。在仓库根直接跑出的读数是「某个落后提交」的�
 浏览器实测优先 `@wingsky-1/dsh-verify-isolated`（临时 `DSH_HOME` + 独立 profile + 独立
 端口）：先 `dsh plugin --profile web list | grep dsh-verify-isolated` 自检；未装则报缺，
 或按 DEVELOPMENT §5 手工临时 `DSH_HOME` 验证，也可请用户安装——**不得改用户 profile 代装**。
-[`.dsh/mcp.json`](.dsh/mcp.json) 的浏览器 MCP 同理：需 `dsh-mcp-manager` 已装才生效。
+[`.dsh/@wingsky-1/dsh-mcp-manager/mcp.json`](.dsh/@wingsky-1/dsh-mcp-manager/mcp.json) 的浏览器 MCP 同理：需 `dsh-mcp-manager` 已装才生效。
 
 ## 任务与流程
 
@@ -97,6 +97,7 @@ worktree 内。在仓库根直接跑出的读数是「某个落后提交」的�
 - 结论里**逐条粘贴实际 exit code**；任一非 0 不得声称完成。
 - **退出码三态**：`0` = 通过；`1` = 判红可信；`2` = **门禁故障，不可信 ⇒ 禁止合并**，
   原 issue 开 P0 跟踪，**不允许以「环境抖动」结案**；同一判词 30 天内第二次即熔断（`blocked-human`）。
+- 散文段数 `verify:prose-counts`（#767 P6）：`gauntlet.config.json` 里 config/scope 类散文字段的段清单/段数必须与 `mutation-topology.json` 的 segments 事实源一致（集合比对，顺序无关）；失配判红（exit 1），形态未知或事实源缺失 fail-closed（exit 2，禁止合并）。本行不写段数——段数只活在拓扑里，散文只许复述。
 - 新增 `homedir()` / `process.env.HOME` / `untildify()` 调用**没有豁免通道**：
   一律改走 [`shared/dsh-home.js`](shared/dsh-home.js) 的 `dshHome()` 接缝。
 
@@ -125,7 +126,7 @@ worktree 内。在仓库根直接跑出的读数是「某个落后提交」的�
 - **布局**：`packages/dsh-<name>/` 功能包、[`packages/dsh-plugins-all/`](packages/dsh-plugins-all/) 聚合包（patch 由
   [`scripts/gate/aggregate.ts`](scripts/gate/aggregate.ts) 生成）、[`shared/`](shared/) 宿主与客户端共享模块（清单见
   [shared/README.md](shared/README.md)）、[`scripts/`](scripts/)（build / gate / lib / release / test /
-  data）、[`agents/`](agents/) 自治循环角色规程、[`.dsh/skills/`](.dsh/skills/) 项目级 skill、[`.dsh/mcp.json`](.dsh/mcp.json) 浏览器 MCP。
+  data）、[`agents/`](agents/) 自治循环角色规程、[`.dsh/skills/`](.dsh/skills/) 项目级 skill、[`.dsh/@wingsky-1/dsh-mcp-manager/mcp.json`](.dsh/@wingsky-1/dsh-mcp-manager/mcp.json) 浏览器 MCP。
 - **non-goals**：不做与插件集无关的通用工具库；不发运行时依赖；内部 / 私有治理文档不入库；
   临时脚本与草稿不入库（用 `.maintenance-drafts/`，已在 [`.gitignore`](.gitignore)）。
 

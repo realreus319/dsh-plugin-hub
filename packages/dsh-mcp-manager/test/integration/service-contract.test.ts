@@ -1,8 +1,8 @@
 /**
  * dsh-mcp-manager — 核心服务契约独立门禁（issue #476，service-contract）。
  *
- * 背景：`ctx.mcpManager` 服务类型面（shared/mcp-manager-service.d.ts）是单一
- * 事实源，但提供方 apply.ts 的 provide 对象方法全是宽面签名（string /
+ * 背景：`ctx.mcpManager` 服务类型面（src/shared/service.ts）是单一
+ * 事实源，但提供方 src/index.ts 的 provide 对象方法全是宽面签名（string /
  * Record<string, unknown>），与类型面无编译期锚点；此前「契约签名变更未同步
  * 测试」纯靠人工，改 shared 类型不触发任何检查（skipLibCheck + 消费方 import
  * 不炸即绿）。
@@ -13,7 +13,7 @@
  *    本文件被 tsc 编译即红。本文件的类型断言在 Node 直跑（type stripping）时
  *    被擦除，因此必须由编译面执行（接线见文件头注释链：scripts/test/
  *    service-contract-wiring.test.ts spawn tsc -p test/tsconfig.json）。
- * 2. 运行时：静态读取 apply.ts 源文本，提取 `ctx.provide("mcpManager", {...})`
+ * 2. 运行时：静态读取 src/index.ts 源文本，提取 `ctx.provide("mcpManager", {...})`
  *    对象的方法名集合 + 参数个数/可选位，与契约清单比对（不多不少）——提供方
  *    删方法/改参数形状逃过 tsc 宽面签名时红。
  *
@@ -24,16 +24,25 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-// 提供方视角（与 src/service.ts 同款相对路径）：shared 类型面单一事实源。
+// 提供方视角（与 src/shared/interface.ts 同款相对路径）：shared 类型面单一事实源。
 import type {
+  ClientUiConfig,
   McpManagerServerInput,
   McpManagerService,
   McpScope,
   McpServerStatus,
   McpServerSummary,
   McpToolInfo,
-} from "../../../../shared/mcp-manager-service.js";
-import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
+} from "../../src/shared/interface.ts";
+// 客户端视角：同一份 DTO 的薄 re-export（客户端不得自带副本）。
+import type {
+  ClientUiConfig as ClientUiConfigView,
+  McpServerListEntry as ClientServerListEntry,
+} from "../../src/client/core/state.ts";
+import type { McpServerListEntry } from "../../src/shared/interface.ts";
+// 本地最小形状（service.ts 禁非同目录 import，见 shared-leaf 判据）：与官方
+// ToolDefinition 的结构子集兼容（官方对象可赋值给它），消费端只读这三字段。
+import type { EncapsulatedToolDefinition } from "../../src/shared/service.ts";
 
 // ─────────────────────────── 编译期类型断言区 ───────────────────────────
 // tsd 风格零依赖类型原语（自实现，不引第三方）。
@@ -50,7 +59,7 @@ type Equal<A, B> =
  */
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
-// 类型面：6 个导出类型自含清单（与 shared/mcp-manager-service.d.ts 逐项比对；
+// 类型面：6 个导出类型自含清单（与 src/shared/service.ts 逐项比对；
 // 结构漂移 → 编译红）。标量/联合用 Equal 精确锁，对象结构用 Same 双向锁。
 type _SvcStatus = Assert<
   Equal<
@@ -90,7 +99,7 @@ type _SvcServerInput = Assert<
       toolCallTimeoutMs?: number;
       reconnect?: Record<string, unknown>;
       description?: string;
-      toolDefinitions?: ToolDefinition[];
+      toolDefinitions?: EncapsulatedToolDefinition[];
     }
   >
 >;
@@ -160,9 +169,30 @@ type _SummaryKeys = Assert<
   >
 >;
 
+// ────────────────── 跨端 DTO 形状一致性锁（编译期，D5/#767 B1.5b） ──────────────────
+// 判据面两层：
+//   A 两端互赋：客户端转出的类型与 src/shared/dto.ts 的定义必须双向可赋值
+//     （任一方向子型关系破 = 某端的字段类型漂移）。
+//   B 键集相同：Same 对「多一个可选字段」不敏感，故键集另锁一层——客户端自带
+//     副本并增删字段时，只有 B 会红。
+// 客户端今天只是薄 re-export，A/B 因此恒真；它们的价值是**漂移时的判据**：
+// 任何人把 re-export 换回本地 interface，任一字段增删改都会在这里判红。
+// 这 5 条锁以 export 形式声明：lint 的 warning 预算已无余量（671 上限），而
+// 非导出的 type alias 每条都会记一次 no-unused-vars——断言的有效性由 tsc 编译面给出，
+// 与是否导出无关（接线见 scripts/test/service-contract-wiring.test.ts）。
+export type DtoListEntryMutual = Assert<Same<ClientServerListEntry, McpServerListEntry>>;
+export type DtoListEntryKeys = Assert<Equal<keyof ClientServerListEntry, keyof McpServerListEntry>>;
+export type DtoUiConfigMutual = Assert<Same<ClientUiConfigView, ClientUiConfig>>;
+export type DtoUiConfigKeys = Assert<Equal<keyof ClientUiConfigView, keyof ClientUiConfig>>;
+// DTO 抽象层不得反噬服务面：列表条目是服务摘要的**超集**（服务摘要 7 键都在列表条目里，
+// 且逐键类型可赋），故服务查询面的字段在列表载荷里取得到同名同型。
+export type DtoListCoversService = Assert<
+  McpServerSummary extends Pick<McpServerListEntry, keyof McpServerSummary> ? true : false
+>;
+
 // ─────────────────────────── 运行时方法面断言区 ───────────────────────────
 // 契约清单（方法名 + 参数个数 + 可选参数个数）。单一事实源：与上方编译期清单
-// 同源同序；提供方 apply.ts 的 provide 对象若删方法/加方法/改参数形状 → 红。
+// 同源同序；提供方 src/index.ts 的 provide 对象若删方法/加方法/改参数形状 → 红。
 const CONTRACT_METHODS: ReadonlyArray<{ name: string; paramCount: number; optionalCount: number }> =
   [
     { name: "registerServer", paramCount: 1, optionalCount: 0 },
@@ -178,8 +208,8 @@ const CONTRACT_METHODS: ReadonlyArray<{ name: string; paramCount: number; option
 const pkgDir = fileURLToPath(new URL("../../", import.meta.url));
 
 /**
- * 从 apply.ts 源文本提取 provide("mcpManager", {...}) 对象的方法面。
- * 说明：provide 对象字面量未导出、且 apply.ts 导入链重（不 import 运行时），
+ * 从 src/index.ts 源文本提取 provide("mcpManager", {...}) 对象的方法面。
+ * 说明：provide 对象字面量未导出、且 src/index.ts 导入链重（不 import 运行时），
  * 故用源文本级静态提取（v2 方案「c 兜底」层级：方法名存在性 + 参数形状即可抓
  * 删方法/改参数量；不做 AST 级双真源）。括号配对跳过字符串与注释，防方法体
  * 内大括号干扰对象边界。
@@ -193,10 +223,10 @@ function extractProvidedServiceMethods(): {
   bodyEnd: number;
   methods: Array<{ name: string; paramCount: number; optionalCount: number }>;
 } {
-  const src = readFileSync(join(pkgDir, "src", "bootstrap", "apply-services.ts"), "utf8");
+  const src = readFileSync(join(pkgDir, "src", "index.ts"), "utf8");
   // 锚定首个 `provide("mcpManager", {` marker（非 AST——测试刻意不做解析级双真源，
-  // 方法名存在性 + 参数个数即可抓「删方法/改参数量」）。当前 apply.ts 全文件仅此
-  // 一处该形态调用，indexOf 首个命中即目标；若未来 apply.ts 出现多处 provide
+  // 方法名存在性 + 参数个数即可抓「删方法/改参数量」）。当前 src/index.ts 全文件仅此
+  // 一处该形态调用，indexOf 首个命中即目标；若未来 src/index.ts 出现多处 provide
   // 调用或形态变化导致本提取失配，测试会红并提示人工更新（fail-loud，不静默）。
   const marker = 'provide("mcpManager", {';
   const markerIndex = src.indexOf(marker);
@@ -299,10 +329,10 @@ function extractProvidedServiceMethods(): {
   return { markerIndex, bodyStart, bodyEnd, methods };
 }
 
-describe("service-contract：apply.ts provide 方法面与契约清单一致", () => {
+describe("service-contract：src/index.ts provide 方法面与契约清单一致", () => {
   const extracted = extractProvidedServiceMethods();
 
-  it('apply-services.ts 应包含 ctx.provide("mcpManager", {...}) 服务注入', () => {
+  it('src/index.ts 应包含 ctx.provide("mcpManager", {...}) 服务注入', () => {
     expect(extracted.markerIndex >= 0).toBe(true);
   });
 

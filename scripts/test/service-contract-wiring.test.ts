@@ -4,8 +4,9 @@
 /**
  * mcp-manager-service 契约测试编译面接线（issue #476 service-contract；#845 收全面）。
  *
- * 为什么存在：shared/mcp-manager-service.d.ts 是 ctx.mcpManager 服务类型面的
- * 单一事实源，但提供方包的主 tsconfig（include src/**）不编译 test/，
+ * 为什么存在：packages/dsh-mcp-manager/src/shared/service.ts 是 ctx.mcpManager 服务
+ * 类型面的单一事实源（#767 B1.5b 起；此前在仓库级 shared/），但提供方包的主
+ * tsconfig（include src/**）不编译 test/，
  * \`pnpm typecheck\`/\`pnpm build\` 的 tsc 面到不了契约测试文件；而 \`pnpm test\`/
  * \`pnpm test:scripts\` 都是 Node 直跑 TS（type stripping 擦除类型断言）——若只
  * 靠直跑，编译期 Equal/Same 断言是「假锁」（方案评审 P0-A 已实证）。
@@ -99,20 +100,41 @@ const EXPECT_FILES: Record<string, string[]> = {
   ],
   "dsh-mcp-manager": [
     "helpers.ts",
+    "integration/real-context.test.ts",
     "integration/service-contract.test.ts",
+    "unit/ports/api-ports.test.ts",
+    "unit/ports/catalog-ports.test.ts",
+    "unit/ports/inject-ports.test.ts",
+    "unit/ports/lifecycle-ports.test.ts",
+    "unit/ports/orchestrator-ports.test.ts",
+    "unit/ports/pipeline-ports.test.ts",
+    "unit/ports/runtime-ports.test.ts",
     "unit/unit-apply.test.ts",
     "unit/unit-call-stats.test.ts",
     "unit/unit-catalog.test.ts",
+    "unit/unit-config-env.test.ts",
+    "unit/unit-dispatch.test.ts",
+    "unit/unit-file-io-queue.test.ts",
+    "unit/unit-file-io.test.ts",
     "unit/unit-hotspot.test.ts",
+    "unit/unit-image-admission.test.ts",
+    "unit/unit-init-failure.test.ts",
+    "unit/unit-lifecycle-logs.test.ts",
+    "unit/unit-lifecycle-mount.test.ts",
+    "unit/unit-lifecycle.test.ts",
     "unit/unit-manager.test.ts",
     "unit/unit-manager2.test.ts",
     "unit/unit-middleware.test.ts",
+    "unit/unit-official-package-face.test.ts",
     "unit/unit-pipeline.test.ts",
     "unit/unit-routes-sse.test.ts",
     "unit/unit-shared.test.ts",
     "unit/unit-store.test.ts",
-    "unit/unit-supervisor.test.ts",
-    "unit/unit-transport.test.ts",
+    "unit/unit-visibility.test.ts",
+    "unit/upgrade/service.test.ts",
+    "unit/upgrade/storage-layout.test.ts",
+    "unit/upgrade/version.test.ts",
+    "unit/unit-workspace-id.test.ts",
     "unit/unit-workspace.test.ts",
   ],
   "dsh-notifier": [

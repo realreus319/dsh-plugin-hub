@@ -3,51 +3,20 @@
  *
  * 所有可变状态收进单一 McpState 对象，在 apply() 内创建，经参数传递到各模块。
  * 禁止模块级全局变量，确保连续挂载/卸载无残留。
+ *
+ * 跨端 DTO 形状（服务器列表条目 / 浮窗 UI 配置）的物理定义在 src/shared/dto.ts
+ * （D5）：这里只做薄 re-export，客户端不得自带等值副本——一致性锁
+ * test/e2e/cross-end-lock.test.ts 与 test/integration/service-contract.test.ts 盯这条。
  */
 
 import { API } from "./constants.ts";
-import { DEFAULT_Z_INDEX_BASE } from "../../placement-math.ts";
+import { DEFAULT_Z_INDEX_BASE } from "../../shared/interface.ts";
+import type { ClientUiConfig, ServerState } from "../../shared/interface.ts";
 
-/** 单台 MCP 服务器面向 UI 的摘要形态。 */
-export interface McpServerSummary {
-  name: string;
-  transport: string;
-  status: string;
-  scope: string;
-  enabled: boolean;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-  url?: string;
-  headers?: Record<string, string>;
-  error?: string;
-  tools?: string[];
-  /** 工具级被用户禁用的工具名列表（独立于服务器级 enabled）。 */
-  disabledTools?: string[];
-  toolCallTimeoutMs?: number;
-  description?: string;
-}
+export type { ClientUiConfig, McpServerListEntry } from "../../shared/interface.ts";
 
-/** 各状态计数。 */
-export interface McpCounts {
-  connected?: number;
-  connecting?: number;
-  reconnecting?: number;
-  stopped?: number;
-  disabled?: number;
-  failed?: number;
-}
-
-/** 浮窗 UI 配置（客户端扁平形态，与 host normalizeUiConfig 兼容）。 */
-export interface McpUiConfig {
-  position: string;
-  offsetX: number;
-  offsetY: number;
-  blankY: number;
-  /** 层级基准（clamp 1-9000；胶囊与点击后弹出的主面板同取该配置值）。 */
-  zIndexBase: number;
-}
+/** 各状态计数（六态键的物理定义在 shared/status.ts，宿主与客户端同一份）。 */
+export type McpCounts = Partial<Record<ServerState, number>>;
 
 /** MCP 管理器客户端全部可变状态。 */
 export interface McpState {
@@ -63,8 +32,6 @@ export interface McpState {
   activeTab: string;
   /** 服务器列表。 */
   servers: any[];
-  /** 中间层模式（off/project/all；来自 summary）。 */
-  middlewareMode: string;
   /** 各状态计数。 */
   counts: any;
   /** 正在编辑的服务器名称（undefined 表示新建）。 */
@@ -91,9 +58,9 @@ export interface McpState {
   currentCwd: any;
   projectRoot: any;
   updateFloatState: any;
-  mcpUiConfig: McpUiConfig;
+  mcpUiConfig: ClientUiConfig;
 
-  // 与宿主 ROUTES 一致的路径（单一来源见 src/client/constants.ts）。
+  // 路径表（单一来源 src/shared/routes.ts，经 client/core/constants.ts 投影）。
   API: typeof API;
 }
 
@@ -106,7 +73,6 @@ export function createState(): McpState {
     open: false,
     activeTab: "servers",
     servers: [],
-    middlewareMode: "project",
     counts: {},
     editingName: undefined,
     editing: undefined,

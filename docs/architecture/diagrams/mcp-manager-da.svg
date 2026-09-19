@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1160 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="da-title da-desc">
+      <title id="da-title">DA：落盘物、一致性与迁移卸载</title>
+      <desc id="da-desc">七类落盘物经 file-io 唯一收敛点读写（登记取表，未登记回落硬化直写）；SSE 只广播最新 summary；升级链失败即抛、成功写刻度，卸载逆序释放。节点名与正文 §3 同词，常量与阈值见正文 §3.1 不进图。</desc>
+      <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
+        <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/>
+        </pattern>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+      <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+      <text x="40" y="40" fill="#4f5d75" font-size="13" font-family="'Geist Mono', monospace" letter-spacing="0.14em">落盘收敛 · file-io 唯一收敛点</text>
+
+      <g id="da-files-top" font-family="'Geist', sans-serif" text-anchor="middle">
+        <rect x="40" y="52" width="240" height="72" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="160" y="96" fill="#2d3142" font-size="19" font-weight="600">全局 mcp.json</text>
+        <rect x="300" y="52" width="240" height="72" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="420" y="96" fill="#2d3142" font-size="19" font-weight="600">项目 mcp.json</text>
+        <rect x="560" y="52" width="240" height="72" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="680" y="88" fill="#2d3142" font-size="19" font-weight="600">user-state.json</text>
+        <text x="680" y="110" fill="#4f5d75" font-size="14">root→server→tool[]</text>
+        <rect x="820" y="52" width="240" height="72" rx="8" fill="#ffffff" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="940" y="88" fill="#2d3142" font-size="19" font-weight="600">旧布局读面</text>
+        <text x="940" y="110" fill="#4f5d75" font-size="14">只读不回写</text>
+      </g>
+
+      <g id="da-fileio">
+        <rect x="460" y="150" width="240" height="80" rx="8" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.6"/>
+        <text x="580" y="184" fill="#2d3142" font-size="20" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">file-io 收敛点</text>
+        <text x="580" y="208" fill="#4f5d75" font-size="14" font-family="'Geist', sans-serif" text-anchor="middle">原子写串行 · 读失败回 null</text>
+      </g>
+
+      <path d="M160 124 V137 H520 V150" fill="none" stroke="#2e5aa8" stroke-width="2" marker-end="url(#arrow)"/>
+      <path d="M420 124 V137 H560 V150" fill="none" stroke="#2e5aa8" stroke-width="2" marker-end="url(#arrow)"/>
+      <path d="M680 124 V150" fill="none" stroke="#2e5aa8" stroke-width="2" marker-end="url(#arrow)"/>
+      <path d="M940 124 V137 H640 V150" fill="none" stroke="#4f5d75" stroke-width="2" marker-end="url(#arrow)"/>
+      <text x="790" y="143" fill="#4f5d75" font-size="14" font-family="'Geist', sans-serif" text-anchor="middle" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">登记取表 · 未登记回落</text>
+
+      <g id="da-files-bottom" font-family="'Geist', sans-serif" text-anchor="middle">
+        <rect x="130" y="256" width="240" height="72" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="250" y="290" fill="#2d3142" font-size="19" font-weight="600">catalog 目录</text>
+        <text x="250" y="312" fill="#4f5d75" font-size="14">last-good 快照</text>
+        <rect x="460" y="256" width="240" height="72" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="580" y="300" fill="#2d3142" font-size="19" font-weight="600">stats.json</text>
+        <rect x="790" y="256" width="240" height="72" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="910" y="300" fill="#2d3142" font-size="19" font-weight="600">version 刻度</text>
+      </g>
+
+      <path d="M520 230 V243 H250 V256" fill="none" stroke="#2e5aa8" stroke-width="2" marker-end="url(#arrow)"/>
+      <path d="M580 230 V256" fill="none" stroke="#2e5aa8" stroke-width="2" marker-end="url(#arrow)"/>
+      <path d="M640 230 V243 H910 V256" fill="none" stroke="#2e5aa8" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <text x="40" y="356" fill="#4f5d75" font-size="13" font-family="'Geist Mono', monospace" letter-spacing="0.14em">流转 · 推送与迁移</text>
+
+      <g id="da-sse">
+        <rect x="40" y="368" width="340" height="96" rx="8" fill="#f1f5fb" stroke="#2e5aa8" stroke-width="1.6"/>
+        <text x="210" y="406" fill="#2d3142" font-size="20" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">SSE summary 广播</text>
+        <text x="210" y="432" fill="#4f5d75" font-size="14" font-family="'Geist', sans-serif" text-anchor="middle">断线不补 · 非队列</text>
+      </g>
+      <g id="da-upgrade">
+        <rect x="410" y="368" width="340" height="96" rx="8" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.6"/>
+        <text x="580" y="406" fill="#2d3142" font-size="20" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">runUpgradeChain</text>
+        <text x="580" y="432" fill="#4f5d75" font-size="14" font-family="'Geist', sans-serif" text-anchor="middle">失败即抛 · 成功写刻度</text>
+      </g>
+      <g id="da-release">
+        <rect x="780" y="368" width="300" height="96" rx="8" fill="#ffffff" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="930" y="406" fill="#2d3142" font-size="20" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">逆序释放</text>
+        <text x="930" y="432" fill="#4f5d75" font-size="14" font-family="'Geist', sans-serif" text-anchor="middle">upgrade 最后复位</text>
+      </g>
+
+      <path d="M750 416 H780" fill="none" stroke="#4f5d75" stroke-width="2" marker-end="url(#arrow)"/>
+      <text x="765" y="432" fill="#4f5d75" font-size="14" font-family="'Geist', sans-serif" text-anchor="middle" style="paint-order:stroke;stroke:#f5f5f5;stroke-width:5px">装配先于卸载</text>
+    </svg>
