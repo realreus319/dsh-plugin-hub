@@ -9,49 +9,60 @@ console.error("EVAL-ORDER-TAG: PURE");
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
+import { ROUTES } from "../src/apply/index.ts";
+// 白盒直连深路径（#768 B波）：历史存储经历史域门面，不走组合根转发。
+import { HistoryStore } from "../src/server/history/interface.ts";
+// 白盒直连深路径（#768 A波7：provider 名经跨端共享门面，适配器 id 经适配器域门面）。
+import { OPENCODE_GO_ADAPTER_ID } from "../src/server/adapters/interface.ts";
+import { OPENCODE_GO_PROVIDER } from "../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：契约版本经 shared 门面，不走组合根转发。
+import { ADAPTER_CONTRACT_VERSION } from "../src/shared/interface.ts";
 import {
-  ROUTES,
-  DEFAULT_CONFIG,
-  ADAPTER_CONTRACT_VERSION,
+  parseUsageResponse,
+  fetchOpenCodeGoV2,
+  openCodeGoAdapter,
+} from "../src/server/adapters/interface.ts";
+// 白盒直连深路径（#768 B波）：契约/净化纯面经 shared 门面，不走组合根转发。
+import {
   esc,
   isUsageStatsAdapter,
-  describeUsageStatsAdapterShape,
   sanitizeHtml,
-  HistoryStore,
+  describeUsageStatsAdapterShape,
+} from "../src/shared/interface.ts";
+import { DEFAULT_CONFIG, normalizeConfig } from "../src/shared/interface.ts";
+import {
+  makeAdapterRegistry,
+  readStamp,
+  stampEqual,
+  loadAndValidateAdapter,
+  resolveProviderConfig,
+} from "../src/server/registry/interface.ts";
+// 白盒直连深路径（#768 B波）：定位/注册表/适配器纯面经域门面，不走组合根转发。
+import {
+  composerDockedAtBottom,
+  bottomAnchorEdge,
+  BREAKPOINT_NARROW_MAX,
+  BREAKPOINT_TABLET_MAX,
+  DEFAULT_UI_CONFIG,
+  Z_INDEX_BASE_MAX,
+  Z_INDEX_BASE_MIN,
+  breakpointForWidth,
+  clampPointToViewport,
+  clampZIndexBase,
+  normalizeUiConfig,
+  panelAnchorForPlacement,
+  panelTopForAnchor,
+  panelZIndexFor,
+} from "../src/shared/interface.ts";
+import { credentialsFile } from "../src/server/registry/interface.ts";
+import { zaiCodingCnAdapter } from "../src/server/adapters/interface.ts";
+import { safeFetchData, safeFormat } from "../src/server/pipeline/interface.ts";
+import {
   parseJsonl,
   startOfDay,
   migrateLegacyV3,
   legacySampleToData,
-  safeFetchData,
-  safeFormat,
-  normalizeConfig,
-  resolveProviderConfig,
-  credentialsFile,
-  OPENCODE_GO_PROVIDER,
-  OPENCODE_GO_ADAPTER_ID,
-  openCodeGoAdapter,
-  parseUsageResponse,
-  fetchOpenCodeGoV2,
-  zaiCodingCnAdapter,
-  loadAndValidateAdapter,
-  readStamp,
-  stampEqual,
-  makeAdapterRegistry,
-  normalizeUiConfig,
-  DEFAULT_UI_CONFIG,
-  panelAnchorForPlacement,
-  panelTopForAnchor,
-  Z_INDEX_BASE_MIN,
-  Z_INDEX_BASE_MAX,
-  BREAKPOINT_NARROW_MAX,
-  BREAKPOINT_TABLET_MAX,
-  breakpointForWidth,
-  clampPointToViewport,
-  clampZIndexBase,
-  panelZIndexFor,
-  composerDockedAtBottom,
-  bottomAnchorEdge,
-} from "../src/apply/index.ts";
+} from "../src/server/history/interface.ts";
 
 // ---------------------------------------------------------------- esc
 

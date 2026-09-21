@@ -367,50 +367,53 @@
           "comment": "#342 v4：src 级文件组分段（2）——apply 单列（#316 拆分后最重文件独立成段）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
         "errsurf": {
-          "mutate": ["packages/dsh-provider-usage/src/domain2/common/errsurf.ts"],
+          "mutate": ["packages/dsh-provider-usage/src/server/shared/errsurf.ts"],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "#670 阶段三 B 新段：域2每层错误面——errsurf.ts（累计计数+最近 N 条环形缓冲+snapshot/noop）；testFiles 含 unit-errsurf（杀灭面）；apply 接线与 routes/ui health per-layer 段由既有 apply/routes 段覆盖（mutate 已含对应文件）。"
+          "comment": "#670 阶段三 B 新段：域2每层错误面——errsurf.ts（累计计数+最近 N 条环形缓冲+snapshot/noop）；testFiles 含 unit-errsurf（杀灭面）；apply 接线与 routes/ui health per-layer 段由既有 apply/routes 段覆盖（mutate 已含对应文件）。#768 S2：canonical 实现迁 server/shared/errsurf.ts（Q5 尺子见文件头），domain2/common/errsurf.ts 过渡垫片 D13 已删（common 目录消除，旧路径引用同步切 server/shared）；杀灭面含 unit-s2-contracts（新叶直连判据）。"
         },
         "contracts": {
           "mutate": [
             "packages/dsh-provider-usage/src/shared/contracts.ts",
-            "packages/dsh-provider-usage/src/domain1/pipeline/guards.ts"
+            "packages/dsh-provider-usage/src/server/pipeline/guards.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "#342 v4：src 级文件组分段（3）——contracts+domain1/pipeline/guards（契约面）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
+          "comment": "#342 v4：src 级文件组分段（3）——contracts+server/pipeline/guards（契约面，#768 D6 随域改址）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
         "entry": {
           "mutate": [
+            "packages/dsh-provider-usage/src/index.ts",
             "packages/dsh-provider-usage/src/apply/index.ts",
-            "packages/dsh-provider-usage/src/domain1/registry/user-adapters.ts",
+            "packages/dsh-provider-usage/src/server/registry/user-adapters.ts",
             "packages/dsh-provider-usage/src/shared/ui-config.ts",
-            "packages/dsh-provider-usage/src/shared/config.ts"
+            "packages/dsh-provider-usage/src/shared/config.ts",
+            "packages/dsh-provider-usage/src/shared/provider.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "#342 v4：src 级文件组分段（1）——index+user-adapters+ui-config+config（配置/入口面）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
+          "comment": "#342 v4：src 级文件组分段（1）——index+user-adapters+ui-config+config（配置/入口面）；#768 D7 注册表文件随域迁 server/registry（路径同步，行为零改 + 双启用判据）；#768 D13 包根入口 src/index.ts 落地（apply/index.ts 显式具名薄转发，导出面零漂移）并入本段；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
         "pipeline": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain1/history/history.ts",
-            "packages/dsh-provider-usage/src/domain1/pipeline/v2.ts",
-            "packages/dsh-provider-usage/src/domain1/registry/hotreload.ts",
-            "packages/dsh-provider-usage/src/domain1/registry/path-resolve.ts",
+            "packages/dsh-provider-usage/src/server/history/history.ts",
+            "packages/dsh-provider-usage/src/server/pipeline/v2.ts",
+            "packages/dsh-provider-usage/src/server/registry/hotreload.ts",
+            "packages/dsh-provider-usage/src/server/registry/path-resolve.ts",
             "packages/dsh-provider-usage/src/shared/placement-math.ts",
             "packages/dsh-provider-usage/src/shared/client-logic.ts",
-            "packages/dsh-provider-usage/src/domain1/registry/provider-config.ts",
+            "packages/dsh-provider-usage/src/server/registry/provider-config.ts",
             "packages/dsh-provider-usage/src/shared/charts.ts",
-            "packages/dsh-provider-usage/src/domain1/pipeline/stats-service.ts"
+            "packages/dsh-provider-usage/src/server/pipeline/stats-service.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "#342 v4：src 级文件组分段（5）——history/v2/hotreload/placement-math/path-resolve/client-logic/provider-config/charts/stats-service（历史/管线/热更/图表/C3 服务面；charts 纳入修复变异盲区；阶段零补 stats-service 盲区）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
+          "comment": "#342 v4：src 级文件组分段（5）——history/v2/hotreload/placement-math/path-resolve/client-logic/provider-config/charts/stats-service（历史/管线/热更/图表/C3 服务面；charts 纳入修复变异盲区；阶段零补 stats-service 盲区）；#768 D5 历史文件随域迁 server/history（路径同步，行为零改 + writeDirect 原子写硬化）；#768 D6 管线三文件随域迁 server/pipeline（路径同步，行为零改 + 净化缺席判据）；#768 D7 注册表三文件随域迁 server/registry（路径同步，行为零改 + 双启用判据）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
         "registry": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain1/registry/registry.ts",
-            "packages/dsh-provider-usage/src/domain1/registry/user-adapter-loader.ts"
+            "packages/dsh-provider-usage/src/server/registry/registry.ts",
+            "packages/dsh-provider-usage/src/server/registry/user-adapter-loader.ts",
+            "packages/dsh-provider-usage/src/server/adapters/register.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "#342 二期：功能命名段（registry）——registry+user-adapter-loader（注册表域，25s；阶段零补 loader 盲区）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
+          "comment": "#342 二期：功能命名段（registry）——registry+user-adapter-loader（注册表域，25s；阶段零补 loader 盲区）；#768 D4 并入 server/adapters/register.ts（内置装配 fail-fast，杀灭面为 test/integration/adapters/composition-root）；#768 D7 注册表两文件随域迁 server/registry（路径同步，行为零改 + 双启用判据，杀灭面新增 test/integration/registry/composition-root）；测试全套跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
         "sanitize": {
           "mutate": ["packages/dsh-provider-usage/src/shared/sanitize.ts"],
@@ -419,56 +422,72 @@
         },
         "trend-aggregate": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain2/aggregate/aggregator.ts",
-            "packages/dsh-provider-usage/src/domain2/aggregate/aggregate-rows.ts",
-            "packages/dsh-provider-usage/src/domain2/aggregate/aggregate-query.ts",
-            "packages/dsh-provider-usage/src/domain2/aggregate/store.ts",
-            "packages/dsh-provider-usage/src/domain2/aggregate/index.ts"
+            "packages/dsh-provider-usage/src/server/aggregate/aggregator.ts",
+            "packages/dsh-provider-usage/src/server/aggregate/aggregate-rows.ts",
+            "packages/dsh-provider-usage/src/server/aggregate/aggregate-query.ts",
+            "packages/dsh-provider-usage/src/server/aggregate/store.ts",
+            "packages/dsh-provider-usage/src/server/aggregate/index.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "阶段零新段（D17 分层变异）：E2 聚合/压实/存储面——aggregator+store+index；阶段三（#670 D2）aggregator 拆分为 aggregate-rows（压实转换纯函数）+ aggregate-query（查询投影纯函数），两新文件并入 mutate 面（防新文件变异盲区）；testFiles 含 unit-trend/unit-trend-ledger/unit-trend-view（杀灭面为该层测试，R8 台账守恒断言覆盖守恒链）；aggregator 单文件 5-8 分钟，独立段防超时。"
+          "comment": "阶段零新段（D17 分层变异）：E2 聚合/压实/存储面——aggregator+store+index；阶段三（#670 D2）aggregator 拆分为 aggregate-rows（压实转换纯函数）+ aggregate-query（查询投影纯函数），两新文件并入 mutate 面（防新文件变异盲区）；testFiles 含 unit-trend/unit-trend-ledger/unit-trend-view（杀灭面为该层测试，R8 台账守恒断言覆盖守恒链）；#768 D8 聚合五文件随域迁 server/aggregate（路径同步 + deletePromises 注解 + A4(f)补dir + forgetPersisted 删除，杀灭面新增 test/integration/aggregate/composition-root）；aggregator 单文件 5-8 分钟，独立段防超时。"
         },
         "trend-collect": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain2/collect/collector.ts",
-            "packages/dsh-provider-usage/src/domain2/collect/types.ts"
+            "packages/dsh-provider-usage/src/server/collect/collector.ts",
+            "packages/dsh-provider-usage/src/server/collect/types.ts",
+            "packages/dsh-provider-usage/src/server/shared/trend.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "阶段零新段（D17 分层变异）：E1 事件采集面——collector+types（折叠状态机/归属归一）；testFiles 含 unit-trend（杀灭面为该层测试）。"
+          "comment": "阶段零新段（D17 分层变异）：E1 事件采集面——collector+types（折叠状态机/归属归一）；testFiles 含 unit-trend（杀灭面为该层测试）；#768 D9 采集两文件随域迁 server/collect（路径同步，零行为变更，杀灭面新增 test/integration/collect/composition-root）。"
         },
         "report-schedule": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain2/schedule/config.ts",
-            "packages/dsh-provider-usage/src/domain2/schedule/schedule.ts",
-            "packages/dsh-provider-usage/src/domain2/schedule/scheduler.ts",
-            "packages/dsh-provider-usage/src/domain2/schedule/tasks.ts",
-            "packages/dsh-provider-usage/src/domain2/common/last-run.ts",
-            "packages/dsh-provider-usage/src/apply/report-config-service.ts"
+            "packages/dsh-provider-usage/src/server/schedule/due.ts",
+            "packages/dsh-provider-usage/src/server/schedule/scheduler.ts",
+            "packages/dsh-provider-usage/src/server/schedule/tasks.ts",
+            "packages/dsh-provider-usage/src/server/schedule/store.ts",
+            "packages/dsh-provider-usage/src/server/config/shape.ts",
+            "packages/dsh-provider-usage/src/server/config/prompts.ts",
+            "packages/dsh-provider-usage/src/server/config/normalize.ts",
+            "packages/dsh-provider-usage/src/server/config/store.ts",
+            "packages/dsh-provider-usage/src/server/config/service.ts",
+            "packages/dsh-provider-usage/src/server/shared/time.ts",
+            "packages/dsh-provider-usage/src/server/shared/prompts.ts",
+            "packages/dsh-provider-usage/src/server/shared/last-run.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "阶段零新段（D17 分层变异）：E3 报告配置/调度面——config+schedule+scheduler+tasks；阶段二（D8）并入 last-run.ts（公共原语）与 report-config-service.ts（配置服务）；testFiles 含 unit-report/unit-report-executor。"
+          "comment": "阶段零新段（D17 分层变异）：E3 报告调度面——schedule+scheduler+tasks；阶段二（D8）并入 last-run.ts（公共原语）；#768 D1 起配置面归 server/config 域（shape/prompts/normalize/store/service）；#768 D2 起调度面整域归 server/schedule（due/scheduler/tasks/store，domain2/schedule 与 common/last-run 旧址删除，interface.ts/deps.ts 以 facade/type-only 口径排除）；testFiles 含 unit-report/unit-report-executor + test/integration/schedule/composition-root（串行锁与门面装配判据）。"
         },
         "report-execute": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain2/execute/runner.ts",
-            "packages/dsh-provider-usage/src/domain2/execute/generate.ts",
-            "packages/dsh-provider-usage/src/domain2/execute/format.ts",
-            "packages/dsh-provider-usage/src/domain2/common/report-index.ts",
-            "packages/dsh-provider-usage/src/domain2/execute/executor.ts",
-            "packages/dsh-provider-usage/src/domain2/execute/list-dirs.ts"
+            "packages/dsh-provider-usage/src/server/execute/report-index.ts",
+            "packages/dsh-provider-usage/src/server/execute/runner.ts",
+            "packages/dsh-provider-usage/src/server/execute/generate.ts",
+            "packages/dsh-provider-usage/src/server/execute/format.ts",
+            "packages/dsh-provider-usage/src/server/execute/executor.ts",
+            "packages/dsh-provider-usage/src/server/execute/list-dirs.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "阶段零新段（D17 分层变异）：E4 报告执行/产出面——runner+generate+format；阶段二（D8）并入 report-index.ts（公共解析）/executor.ts（执行器工厂）/list-dirs.ts（目录候选工厂）；testFiles 含 unit-report/unit-report-executor。"
+          "comment": "阶段零新段（D17 分层变异）：E4 报告执行/产出面——runner+generate+format；阶段二（D8）并入 report-index.ts（公共解析）/executor.ts（执行器工厂）/list-dirs.ts（目录候选工厂）；#768 D3 起整域归 server/execute（6 文件物理迁移，interface.ts/deps.ts 以 facade/type-only 口径排除）；testFiles 含 unit-report/unit-report-executor + test/integration/execute/composition-root（门面装配与记忆化判据）+ test/integration/schedule/composition-root（D3三-轮询否定 toFake 面）。"
         },
         "routes": {
           "mutate": [
-            "packages/dsh-provider-usage/src/domain1/routes/stats.ts",
-            "packages/dsh-provider-usage/src/domain1/routes/adapters.ts",
-            "packages/dsh-provider-usage/src/domain2/routes/ui.ts",
-            "packages/dsh-provider-usage/src/domain2/routes/reports.ts"
+            "packages/dsh-provider-usage/src/server/data-routes/stats.ts",
+            "packages/dsh-provider-usage/src/server/data-routes/adapters.ts",
+            "packages/dsh-provider-usage/src/server/ui-routes/context.ts",
+            "packages/dsh-provider-usage/src/server/ui-routes/health.ts",
+            "packages/dsh-provider-usage/src/server/ui-routes/trend.ts",
+            "packages/dsh-provider-usage/src/server/ui-routes/ui-config.ts",
+            "packages/dsh-provider-usage/src/server/ui-routes/events.ts",
+            "packages/dsh-provider-usage/src/server/report-routes/reports.ts"
           ],
           "excludes": ["!packages/dsh-provider-usage/src/client/**"],
-          "comment": "阶段一新段（评审 P1-5 前置）：E5/C6 路由面——stats+adapters+ui+reports；先抽纯函数（clampTrendN/isReportPeriodValid/isReportKeyValid/isTaskIdValid）补 unit-routes 再开段；testFiles 含 unit-routes/unit-report/unit-apply。"
+          "comment": "阶段一新段（评审 P1-5 前置）：E5/C6 路由面——stats+adapters+ui+reports；先抽纯函数（clampTrendN/isReportPeriodValid/isReportKeyValid/isTaskIdValid）补 unit-routes 再开段；testFiles 含 unit-routes/unit-report/unit-apply；#768 D10 stats/adapters 两文件由 domain1/routes 改名迁 server/data-routes（路径同步，零行为变更，杀灭面新增 test/integration/data-routes/composition-root）；#768 D11 reports 由 domain2/routes 迁 server/report-routes（interface 门面 + deps 注入面 + 配置窄口消费，零行为变更，杀灭面新增 test/integration/report-routes/composition-root，逆序释放判据锁定）；#768 D12 ui 四块（health/trend/ui-config/events）+ 装配形状（context）由 domain2/routes 迁 server/ui-routes（一域四块不升域，interface 门面 + deps 注入面 + 广播窄口，零行为变更，杀灭面新增 test/integration/ui-routes/composition-root，健康读 errsurf 与 SSE 非可靠判据锁定）。"
+        },
+        "upgrade": {
+          "mutate": ["packages/dsh-provider-usage/src/server/upgrade/**/*.ts"],
+          "excludes": ["!packages/dsh-provider-usage/src/client/**"],
+          "comment": "#768 S3 新段：upgrade 迁移链——storage-layout（纯字节归位）+config-morph（LEGACY 映射割接）+last-run-morph（derive/align）+chain（排序/刻度/对账）+service（装配标记）+version（刻度读写）；interface.ts/deps.ts 经包级 coverageExcludes 以 facade/type-only 口径排除；杀灭面为 test/integration/upgrade/upgrade-chain（幂等三条各有集成用例）。"
         }
       },
       "testLayers": {
@@ -476,7 +495,12 @@
           {
             "pattern": "!packages/dsh-provider-usage/src/**/interface.ts",
             "kind": "facade",
-            "reason": "13 个目录的对外门面（apply/domain1/domain2/shared）：逐个命名 re-export 实际被消费的类型与函数（显式禁 export * from），目录外的调用方一律经它消费，自身不含实现。"
+            "reason": "16 个目录的对外门面（apply/domain1/domain2/shared + #768 S2 新增 server/shared + S3 新增 server/upgrade + D1 新增 server/config + D2 新增 server/schedule + D3 新增 server/execute + D4 整域迁 server/adapters，domain1/adapters 旧址删除）：逐个命名 re-export 实际被消费的类型与函数（显式禁 export * from），目录外的调用方一律经它消费，自身不含实现。条数以本 pattern 为口径事实源。"
+          },
+          {
+            "pattern": "!packages/dsh-provider-usage/src/server/*/deps.ts",
+            "kind": "type-only",
+            "reason": "新增（#768 S2）：upgrade 域依赖声明出口（UpgradeDeps 窄面：logger + root 解析 + 旧文件显式读面；per-root 链留 schedule，不新建 file-io 叶）：文件体全是 export interface/type，转译后无运行时代码，没有可杀灭的变异体；窄面形状（运行时零出口 + 三项可装配）由 unit-s2-contracts 锁定。#768 D2/D3 同口径新增 server/schedule、server/execute（窄面由各域 composition-root 集成用例锁定）；#768 D4 新增 server/adapters（AdapterHostUtils 8 键注入面 + BuiltinRegistryPort 注册窄面，不设聚合 AdapterDeps，窄面由 test/integration/adapters/composition-root.test.ts 锁定）。"
           },
           {
             "pattern": "!packages/dsh-provider-usage/src/**/*.d.mts",
@@ -484,19 +508,19 @@
             "reason": "三个内置适配器（deepseek-official / opencode-go / zai-coding-cn）的手写声明层：只有 declare 出来的常量、函数与接口，运行时实现全在相邻 .mjs，声明层本身零可执行代码。"
           },
           {
-            "pattern": "!packages/dsh-provider-usage/src/domain1/adapters/deepseek-official.mjs",
+            "pattern": "!packages/dsh-provider-usage/src/server/adapters/deepseek-official.mjs",
             "kind": "not-mutated",
-            "reason": "内置 DeepSeek 官方余额适配器的权威实现（区间记账法 classifyIntervalDs/aggregateDaily、B2 断轴 balanceSvg、峰谷徽标）：构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/domain1/adapters/（tsc 不 emit .mjs），它本身在覆盖率面内计分、但不进 .ts 域变异段；变异行为面由 test/unit/adapters/unit-deepseek-official.test.ts 直测。"
+            "reason": "内置 DeepSeek 官方余额适配器的权威实现（区间记账法 classifyIntervalDs/aggregateDaily、B2 断轴 balanceSvg、峰谷徽标）：构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/server/adapters/（tsc 不 emit .mjs），它本身在覆盖率面内计分、但不进 .ts 域变异段；变异行为面由 test/unit/adapters/unit-deepseek-official.test.ts 直测；#768 D4 随域迁 server/adapters（文件零改动）。"
           },
           {
-            "pattern": "!packages/dsh-provider-usage/src/domain1/adapters/opencode-go.mjs",
+            "pattern": "!packages/dsh-provider-usage/src/server/adapters/opencode-go.mjs",
             "kind": "not-mutated",
-            "reason": "内置 opencode-go 用量适配器的权威实现（三窗口取数与迷你图卡片，图表/日界函数全走宿主注入的 utils，miniChartSvgMarkup 是给测试导入面的兼容导出）：与另两个内置适配器同批 mjs 化，构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/domain1/adapters/，它本身在覆盖率面内计分、不进 .ts 域变异段。"
+            "reason": "内置 opencode-go 用量适配器的权威实现（三窗口取数与迷你图卡片，图表/日界函数全走宿主注入的 utils，miniChartSvgMarkup 是给测试导入面的兼容导出）：与另两个内置适配器同批 mjs 化，构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/server/adapters/，它本身在覆盖率面内计分、不进 .ts 域变异段；#768 D4 随域迁 server/adapters（文件零改动）。"
           },
           {
-            "pattern": "!packages/dsh-provider-usage/src/domain1/adapters/zai-coding-cn.mjs",
+            "pattern": "!packages/dsh-provider-usage/src/server/adapters/zai-coding-cn.mjs",
             "kind": "not-mutated",
-            "reason": "内置智谱 Coding Plan (CN) 配额适配器的权威实现（端点与窗口判定按 2026-08-27 真 key 实测固化：CREDIT_LIMIT 按 unit 判 5h/周、percentage 取服务端权威口径、网关 200 加业务码 404 判 bad-data）：构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/domain1/adapters/，它本身在覆盖率面内计分（本轮实测 13.9%）、不进 .ts 域变异段。"
+            "reason": "内置智谱 Coding Plan (CN) 配额适配器的权威实现（端点与窗口判定按 2026-08-27 真 key 实测固化：CREDIT_LIMIT 按 unit 判 5h/周、percentage 取服务端权威口径、网关 200 加业务码 404 判 bad-data）：构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/server/adapters/，它本身在覆盖率面内计分（本轮实测 13.9%）、不进 .ts 域变异段；#768 D4 随域迁 server/adapters（文件零改动）。"
           }
         ]
       }

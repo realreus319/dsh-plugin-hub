@@ -33,13 +33,12 @@
  * （合法 dir 经 resolveCwd 净化、缺失归 TREND_UNIDENTIFIED）、跨天（DAY0/DAY1 逐日对账）。
  */
 import { afterAll, describe, expect, it } from "vitest";
-import {
-  TrendCollector,
-  TrendAggregator,
-  dayKey,
-  sumToken,
-  TREND_UNIDENTIFIED,
-} from "../../../src/apply/index.ts";
+// 白盒直连深路径（#768 B波）：日界纯面经 shared 门面，不走组合根转发。
+import { dayKey } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波续批）：趋势双文件簇经域门面，不走组合根转发。
+import { TrendAggregator } from "../../../src/server/aggregate/interface.ts";
+import { TrendCollector } from "../../../src/server/collect/interface.ts";
+import { sumToken, TREND_UNIDENTIFIED } from "../../../src/server/shared/interface.ts";
 
 // ---------------------------------------------------------------- 工具（与 unit-trend.test.ts 同口径）
 

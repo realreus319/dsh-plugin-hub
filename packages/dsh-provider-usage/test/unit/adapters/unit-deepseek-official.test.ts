@@ -20,17 +20,19 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// 白盒直连深路径（#768 B波）：日界纯面经 shared 门面，不走组合根转发。
+import { dayKey } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：契约/净化纯面经 shared 门面，不走组合根转发。
+import { esc, sanitizeHtml, isUsageStatsAdapter } from "../../../src/shared/interface.ts";
+import { runV2Pipeline } from "../../../src/server/pipeline/interface.ts";
+import { resolveProviderConfig } from "../../../src/server/registry/interface.ts";
+// 白盒直连深路径（#768 B波）：适配器纯面经 server/adapters 门面，不走组合根转发。
 import {
-  esc,
-  sanitizeHtml,
-  isUsageStatsAdapter,
-  resolveProviderConfig,
-  runV2Pipeline,
-  openCodeGoAdapter,
-  OPENCODE_GO_ADAPTER_ID,
-  deepSeekOfficialAdapter,
-  DEEPSEEK_OFFICIAL_PROVIDER,
   DEEPSEEK_OFFICIAL_ADAPTER_ID,
+  DEEPSEEK_OFFICIAL_PROVIDER,
+  OPENCODE_GO_ADAPTER_ID,
+  openCodeGoAdapter,
+  deepSeekOfficialAdapter,
   PEAK_WINDOWS_UTC,
   isPeakUtc,
   nextPeakTransition,
@@ -39,13 +41,12 @@ import {
   resolveEndpoint,
   classifyIntervalDs,
   aggregateDaily,
-  dayKey,
   lastNDayKeys,
   niceCeil,
   TOL,
   ANOMALY_NEG,
   dailyBarTitle,
-} from "../../../src/apply/index.ts";
+} from "../../../src/server/adapters/interface.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -917,7 +918,7 @@ describe("G1 常量存在 + 源码注释附官方定价 URL 与核实日期", ()
 
   beforeAll(() => {
     src = readFileSync(
-      join(here, "..", "..", "..", "src", "domain1", "adapters", "deepseek-official.mjs"),
+      join(here, "..", "..", "..", "src", "server", "adapters", "deepseek-official.mjs"),
       "utf8",
     );
   });

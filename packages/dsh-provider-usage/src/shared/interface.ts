@@ -18,22 +18,12 @@
 // ------------------------------------------------------------------ 契约（contracts.ts）
 
 export {
-  ADAPTER_CONTRACT_VERSION_V1,
   ADAPTER_CONTRACT_VERSION,
   ERROR_CODES,
   esc,
   isUsageStatsAdapter,
   describeUsageStatsAdapterShape,
   safeSegment,
-  USAGE_GLOBAL_KEY,
-  isHostProviderAdapter,
-  describeAdapterShape,
-  isClientProviderRenderer,
-  usageError,
-  usageOk,
-  summarizeTextFromWindows,
-  levelFromWindows,
-  defineUsageAdapter,
 } from "./contracts.ts";
 export type {
   AdapterErrorCode,
@@ -41,19 +31,6 @@ export type {
   CapsuleInput,
   PanelInput,
   UsageStatsAdapter,
-  UsageWindow,
-  ProviderUsage,
-  SummaryLevel,
-  ProviderSummary,
-  SampleColumn,
-  FetchLike,
-  HostFetchContext,
-  SamplePointData,
-  HostProviderAdapter,
-  ClientProviderRenderer,
-  RenderContext,
-  DshUsageGlobal,
-  UsageAdapterSpec,
 } from "./contracts.ts";
 
 // ------------------------------------------------------------------ 图表/转义/日界工具（charts.ts）
@@ -80,6 +57,10 @@ export {
   ADAPTER_UTILS,
 } from "./charts.ts";
 export type { AdapterUtils } from "./charts.ts";
+
+// ------------------------------------------------------------------ 跨端 provider 名（provider.ts，#768 A波7）
+
+export { OPENCODE_GO_PROVIDER } from "./provider.ts";
 
 // ------------------------------------------------------------------ 配置归一化（config.ts）
 

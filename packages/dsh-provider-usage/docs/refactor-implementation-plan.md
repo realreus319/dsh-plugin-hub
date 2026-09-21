@@ -17,8 +17,8 @@
   - C4 纯存储，直读合法
   - C5 retention 死字段已删除（AdapterConfig 不再含 retention）
   - C6 面板缓存四段语义整体下沉为 `StatsService.getPanelResult`；registry/history 直读保留
-  - E3⇄E4 双向静态依赖已解耦为**共同依赖域2公共层**（`domain2/common/last-run.ts`、`report-index.ts`，无状态无缓存）
-  - E4 executor 独立工厂文件（`domain2/execute/executor.ts`），错误脱敏为工厂契约字段
+  - E3⇄E4 双向静态依赖已解耦为**调度链单源 + 执行域纯面复用**（last-run 链归 `server/schedule/store.ts`，#768 D2；index 解析归 `server/execute/report-index.ts`，#768 D3；两处均无状态外泄）
+  - E4 executor 独立工厂文件（`server/execute/executor.ts`，#768 D3 前在 `domain2/execute/executor.ts`），错误脱敏为工厂契约字段
   - E5 /events SSE 死面文档化保留（backlog，客户端零消费）
 - 死面清理（已完成，收尾 #680）：`capsuleHtmlFromHistory` 已删除、`AdapterConfig.retention` 已删除；lib 导出面 213→212。
 
@@ -76,12 +76,12 @@ src/
   domain2/                         # 域2 · 事件监听 · 趋势与报告框架
     collect/    interface.ts + collector/types                  # E1
     aggregate/  interface.ts + aggregator/aggregate-rows/aggregate-query/store/index   # E2（D2 纯函数拆分）
-    common/     interface.ts + last-run/report-index/errsurf    # 域2公共层：无状态无缓存（D8 归位，errsurf 为 D2 错误面）
-    schedule/   interface.ts + config/schedule/scheduler/tasks  # E3（DEFAULT_PROMPTS 在 config.ts 内）
-    execute/    interface.ts + runner/generate/format/executor/list-dirs   # E4（executor 独立工厂 + list-dirs 收敛）
+    common/     interface.ts + errsurf    # 域2公共层：无状态无缓存（last-run.ts 已归 server/schedule/store.ts，#768 D2；report-index.ts 已归 server/execute，#768 D3；errsurf 为过渡垫片）
+    schedule/   （已消除，#768 D2：整域迁 server/schedule/interface.ts + deps.ts + due/scheduler/tasks/store）
+    execute/    （已消除，#768 D3：整域迁 server/execute/interface.ts + deps.ts + report-index/runner/generate/format/executor/list-dirs）
     routes/     interface.ts + ui/reports                       # E5 路由层（宿主）
   apply/                           # 装配层（组合根特权；零隐藏可变状态）
-    interface.ts + apply/index/report-config-service
+    interface.ts + apply/index（报告配置服务已归 server/config/service.ts，#768 D1）
   client/                          # 客户端（本轮不改；双端共享经 shared/ 源码 import）
 ```
 
@@ -90,28 +90,29 @@ src/
 | 目录 | 文件 |
 |---|---|
 | shared/ | interface.ts、contracts.ts、charts.ts、config.ts、sanitize.ts、ui-config.ts、client-logic.ts、placement-math.ts |
-| domain1/registry/ | interface.ts、registry.ts、user-adapters.ts、user-adapter-loader.ts、hotreload.ts、provider-config.ts、path-resolve.ts |
-| domain1/pipeline/ | interface.ts、stats-service.ts、v2.ts、guards.ts |
-| domain1/history/ | interface.ts、history.ts |
-| domain1/adapters/ | interface.ts、deepseek-official.{mjs,d.mts}、opencode-go.{mjs,d.mts}、zai-coding-cn.{mjs,d.mts} |
-| domain1/routes/ | interface.ts、stats.ts、adapters.ts |
-| domain2/collect/ | interface.ts、collector.ts、types.ts |
-| domain2/aggregate/ | interface.ts、aggregator.ts、aggregate-rows.ts、aggregate-query.ts、store.ts、index.ts |
-| domain2/common/ | interface.ts、last-run.ts、report-index.ts、errsurf.ts |
-| domain2/schedule/ | interface.ts、config.ts、schedule.ts、scheduler.ts、tasks.ts |
-| domain2/execute/ | interface.ts、runner.ts、generate.ts、format.ts、executor.ts、list-dirs.ts |
-| domain2/routes/ | interface.ts、ui.ts、reports.ts |
-| apply/ | interface.ts、apply.ts、index.ts、report-config-service.ts |
+| server/registry/ | interface.ts、deps.ts、registry.ts、user-adapters.ts、user-adapter-loader.ts、hotreload.ts、provider-config.ts、path-resolve.ts（#768 D7 由 domain1/registry 整域迁入，interface 门面 + deps 注入面 + 双启用判据） |
+| server/pipeline/ | interface.ts、deps.ts、stats-service.ts、v2.ts、guards.ts（#768 D6 由 domain1/pipeline 整域迁入，interface 门面 + deps 注入面 + 净化缺席判据） |
+| server/history/ | interface.ts、history.ts（#768 D5 由 domain1/history 整域迁入，并发语义确定化） |
+| server/adapters/ | interface.ts、deps.ts、register.ts、deepseek-official.{mjs,d.mts}、opencode-go.{mjs,d.mts}、zai-coding-cn.{mjs,d.mts}（#768 D4 由 domain1/adapters 整域迁入，.mjs 零改动） |
+| server/data-routes/ | interface.ts、deps.ts、stats.ts、adapters.ts（#768 D10 由 domain1/routes 改名迁入，interface 门面 + deps 注入面，零行为变更） |
+| server/collect/ | interface.ts、deps.ts、collector.ts、types.ts（#768 D9 由 domain2/collect 整域迁入，interface 门面 + deps 注入面，零行为变更） |
+| server/aggregate/ | interface.ts、deps.ts、aggregator.ts、aggregate-rows.ts、aggregate-query.ts、store.ts、index.ts（#768 D8 由 domain2/aggregate 整域迁入，interface 门面 + deps 注入面 + 随行修正与冻结） |
+| domain2/common/ | interface.ts、errsurf.ts（last-run.ts 已迁 server/schedule/store.ts，#768 D2；report-index.ts 已迁 server/execute/report-index.ts，#768 D3） |
+| server/schedule/ | interface.ts、deps.ts、due.ts、scheduler.ts、tasks.ts、store.ts（#768 D2：到期判定两题不拆整域收拢） |
+| server/execute/ | interface.ts、deps.ts、report-index.ts、runner.ts、generate.ts、format.ts、executor.ts、list-dirs.ts（#768 D3：执行域收拢，parse+记忆化单源） |
+| server/report-routes/ | interface.ts、deps.ts、reports.ts（#768 D11 由 domain2/routes 迁入，interface 门面 + deps 注入面 + 配置窄口消费，零行为变更） |
+| server/ui-routes/ | interface.ts、deps.ts、context.ts、health.ts、trend.ts、ui-config.ts、events.ts（#768 D12 由 domain2/routes 迁入，一域四块不升域，interface 门面 + deps 注入面 + 广播窄口，零行为变更） |
+| domain2/routes/ | interface.ts（空锚点，#768 D12 起：ui 四块已迁 server/ui-routes，reports.ts 已于 D11 迁出；D13 删除本文件并同步基线） |
+| apply/ | interface.ts（空锚点，#768 D11 起：原唯一源码消费改走 server/report-routes/deps.ts 窄口，转发消除，文件保留只为模块归属）、apply.ts、index.ts（报告配置服务已归 server/config/service.ts，#768 D1） |
 | client/ | 保持目录化前布局（本轮未拆分） |
 
 ## 6. 跨域/跨层引用现状（实证）
 
 - 域1/域2/装配 → 共享底座：**一律经各目录 `interface.ts` 面具消费** `shared/interface.ts` 转发的符号
   （charts/config/sanitize/ui-config/contracts 类型等），无跨目录直引实现文件。
-- 域2 → 域1：`domain2/routes/ui.ts` 以 **type-only** 引用 `domain1/pipeline/interface.ts` 的
-  `StatsService`（D7 后仅类型 + cacheSize() 方法调用）。
-- E3⇄E4：不直接互引；`domain2/schedule/tasks.ts` 持有注入的 executor（经 `execute/interface.ts`
-  工厂），双方共同依赖 `domain2/common/`（last-run/report-index，无状态无缓存防 indexCache 双份）。
+- 域2 → 域1：`server/ui-routes/context.ts` 以 **type-only** 引用 `server/pipeline/interface.ts`
+  的 `StatsService`（D7 后仅类型 + cacheSize() 方法调用；#768 D12 前在 `domain2/routes/ui.ts`）。
+- E3⇄E4：不直接互引；`server/schedule/tasks.ts` 持有注入的 executor（经 `server/execute/interface.ts` 工厂，#768 D3 前在 `domain2/execute/interface.ts`），推进与路由 preset 共走 server/schedule 同一 per-root 链；index 解析由调度存储经 `server/execute/` 纯面复用（report-index，无状态无缓存防 indexCache 双份，#768 D3 前在 `domain2/common/`）。
 - 域1 → 域2：**零**（业务面零依赖实证成立）。
 - import 边界强制点：`scripts/gate/verify-dir-imports.mjs`（本包走 `--soft`：跨目录直引软报告
   不卡 CI；interface.ts 符号存在性两模式均硬校验）+ lib 导出面（contract/pack-check 既有）。

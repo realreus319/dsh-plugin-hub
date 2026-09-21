@@ -20,38 +20,59 @@
  * - GET /api/dsh-provider-usage/reports/generate/status  生成任务状态轮询
  */
 
+import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { ServerResponse } from "node:http";
 import type { Context } from "@deepseek-ai/cordis";
 import { sseData } from "../../../../shared/host-utils.js";
 import { installSettingsNamespace } from "../../../../shared/settings-namespace.js";
 import { dshHome, userHome } from "../../../../shared/dsh-home.js";
-import type { AdapterRegistry } from "../domain1/registry/interface.ts";
-import { makeAdapterRegistry } from "../domain1/registry/interface.ts";
-import { openCodeGoAdapter } from "../domain1/adapters/interface.ts";
-import { deepSeekOfficialAdapter } from "../domain1/adapters/interface.ts";
-import { zaiCodingCnAdapter } from "../domain1/adapters/interface.ts";
-import { HistoryStore, migrateLegacyV3 } from "../domain1/history/interface.ts";
-import { HotReloadableAdapter } from "../domain1/registry/interface.ts";
-import { resolvePath } from "../domain1/registry/interface.ts";
+import type { AdapterRegistry } from "../server/registry/interface.ts";
+import { makeAdapterRegistry } from "../server/registry/interface.ts";
+import {
+  openCodeGoAdapter,
+  deepSeekOfficialAdapter,
+  zaiCodingCnAdapter,
+  registerBuiltinAdapters,
+} from "../server/adapters/interface.ts";
+import { HistoryStore, migrateLegacyV3 } from "../server/history/interface.ts";
+import { HotReloadableAdapter } from "../server/registry/interface.ts";
+import { resolvePath } from "../server/registry/interface.ts";
 import { Config, normalizeConfig, type NormalizedConfig } from "../shared/interface.ts";
 import { readUiConfig } from "../shared/interface.ts";
-import { makeLayerErrorSurface } from "../domain2/common/interface.ts";
-import { readAdapterStateResult, readUserAdapters } from "../domain1/registry/interface.ts";
-import { loadUserAdapterChecked } from "../domain1/registry/interface.ts";
-import { StatsServiceCtor as StatsService } from "../domain1/pipeline/interface.ts";
-import { TrendTracker } from "../domain2/aggregate/interface.ts";
-import { readReportConfig } from "../domain2/schedule/interface.ts";
-import { ReportScheduler } from "../domain2/schedule/interface.ts";
-import { optionalNotifier } from "../domain2/execute/interface.ts";
-import { ReportConfigService } from "./report-config-service.ts";
-import { makeDueReportExecutor } from "../domain2/execute/interface.ts";
-import { makeListDirs } from "../domain2/execute/interface.ts";
-import { ReportTaskQueue } from "../domain2/schedule/interface.ts";
-import { createStatsRoutes } from "../domain1/routes/interface.ts";
-import { createAdapterRoutes } from "../domain1/routes/interface.ts";
-import { createUiRoutes } from "../domain2/routes/interface.ts";
-import { createReportRoutes } from "../domain2/routes/interface.ts";
+import { makeLayerErrorSurface } from "../server/shared/interface.ts";
+import { readAdapterStateResult, readUserAdapters } from "../server/registry/interface.ts";
+import { loadUserAdapterChecked, resolveAddAdapterFile } from "../server/registry/interface.ts";
+import { StatsServiceCtor as StatsService } from "../server/pipeline/interface.ts";
+import { TrendTracker } from "../server/aggregate/interface.ts";
+import { TrendCollector } from "../server/collect/interface.ts";
+import { ReportScheduler } from "../server/schedule/interface.ts";
+import { optionalNotifier, parseReportIndexLines } from "../server/execute/interface.ts";
+import {
+  ReportConfigService,
+  normalizeReportConfig,
+  promptFor,
+  readReportConfig,
+} from "../server/config/interface.ts";
+import {
+  makeDueReportExecutor,
+  readReportIndex,
+  reportHtmlFile,
+  reportMetaFile,
+} from "../server/execute/interface.ts";
+import { makeListDirs } from "../server/execute/interface.ts";
+import { ReportTaskQueue } from "../server/schedule/interface.ts";
+import {
+  presetLastRunForNewlyEnabled,
+  previousClosedWindow,
+  readLastRun,
+  updateLastRun,
+} from "../server/schedule/interface.ts";
+import { createStatsRoutes } from "../server/data-routes/interface.ts";
+import { createAdapterRoutes } from "../server/data-routes/interface.ts";
+import { createUiRoutes } from "../server/ui-routes/interface.ts";
+import { createReportRoutes } from "../server/report-routes/interface.ts";
+import { installUpgrade, releaseUpgrade } from "../server/upgrade/interface.ts";
 import type {} from "@deepseek-ai/dsh-session";
 
 export const ROUTES: Record<string, string> = {
@@ -241,7 +262,7 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
 
   // 域2每层错误面（aggregate/schedule/execute）——装配层组合根创建，
   // 经各对象既有 warn 诊断出口接线（层代码零改动）；
-  // health per-layer 段经 UiRoutesContext 注入 routes/ui.ts 读取。
+  // health per-layer 段经 UiRoutesContext 注入 server/ui-routes 读取。
   const layerErrors = makeLayerErrorSurface();
 
   const registry = makeAdapterRegistry({
@@ -252,6 +273,20 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
   };
 
   const historyRoot = config.historyDir || join(dshHome(), "dsh-provider-usage");
+  // upgrade 三步在各域装配前 await 跑完（S3，经 S2 注入面）：先装配等于让各域读到旧形态。
+  // 同进程多次 apply（宿主重载/测试多假宿主）先复位标记，链本身幂等故重跑不累积。
+  releaseUpgrade();
+  await installUpgrade({
+    logger: { warn: (message: string) => console.warn(`[dsh-provider-usage] ${message}`) },
+    resolveRoot: () => historyRoot,
+    readOldFile: async (file: string) => {
+      try {
+        return { ok: true as const, text: await readFile(file, "utf8") };
+      } catch {
+        return { ok: false as const };
+      }
+    },
+  });
   const history = new HistoryStore({
     root: historyRoot,
     maxAgeMs: config.maxAgeDays * 86400000,
@@ -266,9 +301,12 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
     /* 迁移失败不阻断启动 */
   }
 
-  registry.register(openCodeGoAdapter, "builtin");
-  registry.register(deepSeekOfficialAdapter, "builtin");
-  registry.register(zaiCodingCnAdapter, "builtin");
+  // 内置拒收即抛（fail-fast：裸调 register 会吞掉 false，缺失内置静默为“无候选”）。
+  registerBuiltinAdapters(registry, [
+    openCodeGoAdapter,
+    deepSeekOfficialAdapter,
+    zaiCodingCnAdapter,
+  ]);
 
   if (config.adapter !== "") {
     const resolved = resolvePath(config.adapter);
@@ -318,6 +356,8 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
   }
 
   const trend = await TrendTracker.start({
+    // B1 有状态注入：采集器工厂由组合根装配（aggregate 不直引 collect 值边）
+    makeCollector: (opts) => new TrendCollector(opts),
     root: join(historyRoot, "trend"),
     retentionDays: config.trendRetentionDays,
     // aggregate 层错误面接线——压实失败/刷盘失败/归属异常等
@@ -364,8 +404,12 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
       trend,
       ctx,
       getReportCfg: () => reportCfgService.get(),
+      // B2 提示词注入：组合根在已持 reportCfg 处算好字符串传入，执行域不直引 config 值边
+      getPromptTemplate: (period) => promptFor(reportCfgService.get(), period),
       historyRoot,
       sanitizeDiagnostic,
+      // B1 推进注入：per-root 链唯一实现留 schedule 域，执行器不直引值边
+      advanceLastRun: updateLastRun,
     }),
     // execute 层错误面接线——任务执行失败（含 executor 脱敏后错误）
     // 经队列 warn 出口汇聚于此。
@@ -379,6 +423,9 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
   const reportScheduler = ReportScheduler.start({
     root: historyRoot,
     config: reportCfgService.get(),
+    // C 波单向化 + B1 值边清零：index 纯解析经 ScheduleIndexParser 端口注入调度域
+    //（store 不再直引 execute 门面；B1 起执行器推进经 advanceLastRun 注入，值边清零）。
+    parseIndex: parseReportIndexLines,
     // tick 只提交任务（非阻塞，队列去重吸收同窗口堆积），不再等待生成
     onDue: (due) => {
       reportQueue.submit(due);
@@ -436,7 +483,14 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
         inspect: ROUTES.inspect,
         add: ROUTES.add,
       },
-      { ctx, statsService, ensureHotReload },
+      {
+        ctx,
+        statsService,
+        ensureHotReload,
+        // B2 注册注入：路径准入与加载校验由组合根供给（已绑定 registry 实例，路由不直引值边）
+        resolveAdapterFile: (input) => resolveAddAdapterFile(input),
+        loadAdapterChecked: (file) => loadUserAdapterChecked(file, registry),
+      },
     ),
     ...createUiRoutes(
       {
@@ -463,6 +517,18 @@ export async function apply(ctx: Context, rawConfig: Record<string, unknown> = {
         reportCfgService,
         // 目录候选清单收敛为注入查询面（makeListDirs 工厂，apply 零隐藏可变状态）
         listDirs: makeListDirs(trend),
+        // B1 调度注入：纯函数不下沉 shared，读写共走 per-root 链（报告域不直引值边）
+        presetLastRunForNewlyEnabled,
+        previousClosedWindow,
+        readLastRun,
+        updateLastRun,
+        // B2 配置注入：归一化/磁盘读由组合根供给，默认表随服务返回（报告域不直引 config 值边）
+        normalizeReportConfig,
+        readReportConfig,
+        // B2 执行读面注入：只读查询闭包（报告域不直引 execute 值边）
+        readReportIndex,
+        reportHtmlFile,
+        reportMetaFile,
       },
     ),
   ];

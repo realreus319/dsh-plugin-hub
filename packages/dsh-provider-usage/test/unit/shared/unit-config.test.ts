@@ -17,28 +17,30 @@ console.error("EVAL-ORDER-TAG: CONFIG");
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { normalizeConfig, DEFAULT_CONFIG } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：注册表/UI配置纯面经域门面，不走组合根转发。
 import {
-  normalizeConfig,
-  DEFAULT_CONFIG,
-  DEFAULT_UI_CONFIG,
-  normalizeUiConfig,
-  panelAnchorForPlacement,
-  panelTopForAnchor,
-  Z_INDEX_BASE_MIN,
-  Z_INDEX_BASE_MAX,
-  panelZIndexFor,
+  expandHomePath,
+  readAdapterState,
+  resolveAddAdapterFile,
+  parseUserAdapters,
+  resolveProviderConfig,
+} from "../../../src/server/registry/interface.ts";
+import {
+  uiConfigFile,
   BREAKPOINT_NARROW_MAX,
   BREAKPOINT_TABLET_MAX,
+  DEFAULT_UI_CONFIG,
+  Z_INDEX_BASE_MAX,
+  Z_INDEX_BASE_MIN,
   breakpointForWidth,
   clampPointToViewport,
   clampZIndexBase,
-  uiConfigFile,
-  readAdapterState,
-  parseUserAdapters,
-  resolveAddAdapterFile,
-  resolveProviderConfig,
-  expandHomePath,
-} from "../../../src/apply/index.ts";
+  normalizeUiConfig,
+  panelAnchorForPlacement,
+  panelTopForAnchor,
+  panelZIndexFor,
+} from "../../../src/shared/interface.ts";
 
 // ================================================================ #150 二阶段：resolveAddAdapterFile 路径校验矩阵
 // 位置无关：本块断言全部不依赖「本文件先于兄弟文件求值」。

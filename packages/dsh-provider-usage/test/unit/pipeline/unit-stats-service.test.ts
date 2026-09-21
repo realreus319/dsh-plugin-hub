@@ -16,10 +16,10 @@ import { tmpdir } from "node:os";
 import { beforeAll, describe, expect, it } from "vitest";
 import { pollUntil } from "../../helpers.ts";
 import { normalizeConfig } from "../../../src/shared/config.ts";
-import { makeAdapterRegistry } from "../../../src/domain1/registry/registry.ts";
-import { HistoryStore } from "../../../src/domain1/history/history.ts";
-import { panelCacheKey } from "../../../src/domain1/pipeline/v2.ts";
-import { StatsService } from "../../../src/domain1/pipeline/stats-service.ts";
+import { makeAdapterRegistry } from "../../../src/server/registry/registry.ts";
+import { HistoryStore } from "../../../src/server/history/history.ts";
+import { panelCacheKey } from "../../../src/server/pipeline/v2.ts";
+import { StatsService } from "../../../src/server/pipeline/stats-service.ts";
 
 function makeService(overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), "u-usage-stats-"));

@@ -2,8 +2,8 @@
 
 > 适用插件：`@wingsky-1/dsh-provider-usage`（v2 契约重构版）。
 > 本文是 Agent 自主引导用户接入自定义数据源的权威流程手册。
-> 快速参考：契约细节见第 3 节；参考实现见内置适配器源码（`src/domain1/adapters/opencode-go.mjs`、
-> `src/domain1/adapters/deepseek-official.mjs`、`src/domain1/adapters/zai-coding-cn.mjs`）。
+> 快速参考：契约细节见第 3 节；参考实现见内置适配器源码（`src/server/adapters/opencode-go.mjs`、
+> `src/server/adapters/deepseek-official.mjs`、`src/server/adapters/zai-coding-cn.mjs`）。
 > 用户只需编写**纯 JS 的 .mjs 文件**（零 import、完全自包含），无需关心任何类型声明。
 > 插件内部运行机制（取数管道 / 注册表 / 热更新 / 设置页交互）的图解见 [architecture.md](architecture.md)。
 
@@ -69,8 +69,8 @@
   `downsample`/`escHtml`/`escAttr`/`dayKey`/`lastNDayKeys` 等（见第 3.3 节工具清单）。
   适配器内 `const U = input.utils` 后直接调用，无需复制图表代码；CSS 类（`dou-card`/
   `dou-miniChart` 等）仍按内置样式使用。
-- **内置源码 = 使用范例**（`packages/dsh-provider-usage/src/domain1/adapters/opencode-go.mjs`、
-  `src/domain1/adapters/deepseek-official.mjs`、`src/domain1/adapters/zai-coding-cn.mjs`）：照其结构与
+- **内置源码 = 使用范例**（`packages/dsh-provider-usage/src/server/adapters/opencode-go.mjs`、
+  `src/server/adapters/deepseek-official.mjs`、`src/server/adapters/zai-coding-cn.mjs`）：照其结构与
   注入消费方式实现，而非仅凭文字脑补。这些是**纯 JS 的 .mjs**（无任何 import）——
   你的适配器也必须是这样的纯 JS 文件，**不要写 `import` / `import type`**（Node ESM
   不认识 TS 语法，写了加载即失败）。
@@ -235,22 +235,13 @@ export const label = "我的统计";                      // 展示名
 
 ---
 
-## 6. v1 → v2 迁移对照
+## 6. v1 旧契约已删除
 
-> 一般适配器都是新建（直接写 v2 契约），无需迁移；仅当维护旧 v1 适配器时才展开本节。
-
-<details>
-<summary>v1 → v2 迁移对照（点击展开）</summary>
-
-| v1（旧） | v2（新） |
-|---------|---------|
-| `export default { version:1, id, label, providers, fetchUsage }` | 具名导出 `version:2, name, providers, fetchData` |
-| 客户端渲染器 `.js` + `window.__DSH_USAGE__` 桥接 | `formatCapsule`/`formatPanel` 返回 HTML（宿主端渲染） |
-| `summarize`/`samplePoint`/windows 归一化 | 移除，胶囊/面板直接由 format 函数产出 |
-| 设置页运行时 add/select 适配器 | **保留并增强**：设置页「用量统计」承载检测/添加/切换/停用；cordis.patch.yml 声明降为可选叠加 |
-| 历史 v3 多文件 JSON 桶 | 按天分片 JSONL（旧数据启动时自动迁移） |
-
-</details>
+v1 旧契约已随破坏性变更 #932 删除，不再加载：适配器一律按 v2 契约编写
+（具名导出 `version:2, name, providers, fetchData`，`formatCapsule` /
+`formatPanel` 返回 HTML 由宿主端渲染）。设置页「用量统计」承载检测/添加/
+切换/停用；cordis.patch.yml 声明为可选叠加。历史按天分片 JSONL
+（旧数据启动时自动迁移）。
 
 ---
 

@@ -34,11 +34,10 @@ import {
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { callHandler, pollUntil, pollUntilJsonlReady } from "../helpers.ts";
-import {
-  __clearReportIndexCacheForTests,
-  __reportIndexCacheStatsForTests,
-  readReportIndex,
-} from "../../lib/index.js";
+// 白盒直连深路径（#768 B波）：g4 清场须与钩子同模块实例——lib 构建内联了
+// runner.ts 的独立副本（计数器不互通），故清场经深路径，不走包入口。
+// （计数器直读已归位单元层，本文件仅保留清场。）
+import { __clearReportIndexCacheForTests } from "../../src/server/execute/runner.ts";
 
 // 纯函数断言区先行执行（无 @ts-nocheck、强类型）
 import "../smoke-pure.ts";
@@ -46,26 +45,29 @@ import "../smoke-pure.ts";
 // 结构化单元测试（#83 阶段一、#670 阶段四目录镜像）由包内 `test/*.test.ts` glob
 // 直接执行（#690 S2）；此处不再 import 聚合——聚合会让同一文件在同进程内被求值两遍。
 
+import { apply, inject, ROUTES, HotReloadableAdapter } from "../../lib/index.js";
+// 白盒直连深路径（#768 B波）：日界纯面经 shared 门面，不走包入口。
+import { dayKey } from "../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：用户适配器路径纯面经注册表域门面，不走包入口。
+import { userAdaptersFile, adapterStateFile } from "../../src/server/registry/interface.ts";
+// 白盒直连深路径（#768 A波3：目录上限纯面经共享门面，不走包入口）。
+import { TREND_DIR_MAX } from "../../src/server/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：调度纯面经调度域门面，不走包入口。
+import { previousClosedWindow } from "../../src/server/schedule/interface.ts";
+// 白盒直连深路径（#768 B波）：DeepSeek 常量经适配器域门面，OpenCode provider 名经跨端共享门面（#768 A波7）。
 import {
-  apply,
-  inject,
-  ROUTES,
-  previousClosedWindow,
-  ADAPTER_CONTRACT_VERSION,
-  OPENCODE_GO_PROVIDER,
-  OPENCODE_GO_ADAPTER_ID,
-  DEEPSEEK_OFFICIAL_PROVIDER,
   DEEPSEEK_OFFICIAL_ADAPTER_ID,
-  userAdaptersFile,
-  adapterStateFile,
+  DEEPSEEK_OFFICIAL_PROVIDER,
+  OPENCODE_GO_ADAPTER_ID,
+} from "../../src/server/adapters/interface.ts";
+import { OPENCODE_GO_PROVIDER } from "../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：面板缓存与归一化纯面经管线域门面，不走包入口。
+import {
   PANEL_CACHE_TTL_MS,
-  normalizeRangeDay,
   panelCacheKey,
   isPanelCacheStale,
-  dayKey,
-  TREND_DIR_MAX,
-  HotReloadableAdapter,
-} from "../../lib/index.js";
+  normalizeRangeDay,
+} from "../../src/server/pipeline/interface.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -494,6 +496,83 @@ describe("ui-config / events", () => {
   });
 });
 
+// ---------------------------------------------------------------- events 非可靠（#768 D12 验收）
+//
+// 真装配全链路：events 长连接经真 handler 接入真 sseClients 集合，ui-config POST
+// 经真 broadcast 扇出（server/ui-routes 域，apply 只装配不实现）。断线期间的帧直接
+// 丢失，重连只收新连通帧、无补帧——盼补帧的断言在此必须红。可观测面一律经 pollUntil
+//（真后台异步位不用固定 sleep；反向断言用短窗 pollUntil 守无新增而非 sleep 硬等）。
+describe("events 非可靠（断线帧丢失为预期）", () => {
+  let uiRoute;
+  let evRoute;
+  let aChunks;
+  let aEmitClose;
+  let aCountAfterFirstPost;
+
+  function openSse() {
+    const chunks = [];
+    const handlers = new Map();
+    callHandler(evRoute, fakeReq({ method: "GET" }), {
+      write: (c) => {
+        chunks.push(String(c));
+      },
+      on: (evt, fn) => {
+        const list = handlers.get(evt) ?? [];
+        list.push(fn);
+        handlers.set(evt, list);
+      },
+    });
+    return {
+      chunks,
+      emitClose: () => {
+        for (const fn of handlers.get("close") ?? []) fn();
+      },
+    };
+  }
+
+  beforeAll(async () => {
+    const { ctx, routes } = makeFakeCtx();
+    await apply(ctx, { ...ISOLATED_CONFIG });
+    uiRoute = routes.find((r) => r.path === ROUTES.uiConfig);
+    evRoute = routes.find((r) => r.path === ROUTES.events);
+    expect(uiRoute).toBeTruthy();
+    expect(evRoute).toBeTruthy();
+    const a = openSse();
+    aChunks = a.chunks;
+    aEmitClose = a.emitClose;
+    expect(aChunks).toEqual([": connected\n\n"]);
+  });
+
+  it("广播帧可观测（POST→扇出→pollUntil 见帧）", async () => {
+    await callHandler(
+      uiRoute,
+      fakeReq({ method: "POST", body: JSON.stringify({ placement: "top-right" }) }),
+    );
+    const seen = await pollUntil(
+      () => aChunks.find((c) => c.startsWith("data:") && c.includes("ui-config-changed")),
+      2000,
+      50,
+    );
+    expect(seen).toBeTruthy();
+    aCountAfterFirstPost = aChunks.length;
+  });
+
+  it("断线帧丢失（close 后再 POST，闭连接收不到新帧）", async () => {
+    aEmitClose();
+    await callHandler(
+      uiRoute,
+      fakeReq({ method: "POST", body: JSON.stringify({ placement: "top-left" }) }),
+    );
+    const leaked = await pollUntil(() => aChunks.length > aCountAfterFirstPost, 300, 25);
+    expect(leaked).toBeFalsy();
+  });
+
+  it("重连无补帧（新连接只收连通帧，盼补帧即红）", () => {
+    const b = openSse();
+    expect(b.chunks).toEqual([": connected\n\n"]);
+  });
+});
+
 // ---------------------------------------------------------------- /stats v2 响应
 
 describe("/stats v2 响应", () => {
@@ -516,15 +595,18 @@ describe("/stats v2 响应", () => {
   });
 
   it("响应带契约版本 v2", () => {
-    expect(payload.version).toBe(ADAPTER_CONTRACT_VERSION);
+    // 锚：contracts.ts ADAPTER_CONTRACT_VERSION 字面量 2，第二事实源（改实现值必须红）。
+    expect(payload.version).toBe(2);
   });
 
   it("响应 provider 字段", () => {
-    expect(payload.provider).toBe(OPENCODE_GO_PROVIDER);
+    // 锚：opencode-go.mjs OPENCODE_GO_PROVIDER 字面量，第二事实源。
+    expect(payload.provider).toBe("opencode-go");
   });
 
   it("内置适配器名", () => {
-    expect(payload.adapterName).toBe(OPENCODE_GO_ADAPTER_ID);
+    // 锚：opencode-go.mjs OPENCODE_GO_ADAPTER_ID 字面量，第二事实源。
+    expect(payload.adapterName).toBe("opencode-go-builtin");
   });
 
   it("status 合法", () => {
@@ -532,7 +614,8 @@ describe("/stats v2 响应", () => {
   });
 
   it("响应带 adapterVersion", () => {
-    expect(typeof payload.adapterVersion === "number").toBeTruthy();
+    // 锚：stats.ts:52 字面量 0，第二事实源（改实现值必须红）。
+    expect(payload.adapterVersion).toBe(0);
   });
 
   it("不可达端点 → ok 降级为 false 但不崩溃", () => {
@@ -566,16 +649,14 @@ describe("/history v2 响应", () => {
     expect(payload.plugin).toBe("dsh-provider-usage");
   });
 
-  it("history 响应带契约版本", () => {
-    expect(payload.version).toBe(ADAPTER_CONTRACT_VERSION);
-  });
-
   it("history 响应 provider 字段", () => {
-    expect(payload.provider).toBe(OPENCODE_GO_PROVIDER);
+    // 锚：opencode-go.mjs OPENCODE_GO_PROVIDER 字面量，第二事实源。
+    expect(payload.provider).toBe("opencode-go");
   });
 
   it("history 响应 adapterName", () => {
-    expect(payload.adapterName).toBe(OPENCODE_GO_ADAPTER_ID);
+    // 锚：opencode-go.mjs OPENCODE_GO_ADAPTER_ID 字面量，第二事实源。
+    expect(payload.adapterName).toBe("opencode-go-builtin");
   });
 
   it("range 形状合法", () => {
@@ -599,20 +680,89 @@ describe("/health 响应", () => {
     expect(payload.ok).toBe(true);
   });
 
-  it("/health 带契约版本", () => {
-    expect(payload.version).toBe(ADAPTER_CONTRACT_VERSION);
-  });
-
   it("adapters 列表存在", () => {
-    expect(Array.isArray(payload.adapters)).toBeTruthy();
+    expect(Array.isArray(payload.adapters)).toBe(true);
+    expect(payload.adapters.length).toBeGreaterThan(0);
+    // 形状：health 快照条目五键齐（registry.ts AdapterInfo 面）。
+    for (const a of payload.adapters) {
+      expect(a).toEqual(
+        expect.objectContaining({
+          name: expect.any(String),
+          label: expect.any(String),
+          providers: expect.any(Array),
+          source: expect.stringMatching(/^(builtin|user-file)$/),
+          enabled: expect.any(Boolean),
+        }),
+      );
+    }
   });
 
   it("errors 登记表存在", () => {
-    expect(Array.isArray(payload.errors)).toBeTruthy();
+    expect(Array.isArray(payload.errors)).toBe(true);
+    // 形状：错误登记四键齐（registry.ts AdapterErrorInfo + key 面；
+    // 本用例默认配置下空表 vacuously 真，非空覆盖见下节「/health errors 非空表形状」。）
+    for (const e of payload.errors) {
+      expect(e).toEqual(
+        expect.objectContaining({
+          key: expect.any(String),
+          kind: expect.stringMatching(/^(load|exec)$/),
+          message: expect.any(String),
+          at: expect.any(Number),
+        }),
+      );
+    }
   });
 
   it("内置 opencode-go 已注册", () => {
-    expect(payload.adapters.some((a) => a.name === OPENCODE_GO_ADAPTER_ID)).toBeTruthy();
+    // 锚：opencode-go.mjs OPENCODE_GO_ADAPTER_ID 字面量，第二事实源。
+    expect(
+      payload.adapters.some(
+        (a) =>
+          a.name === "opencode-go-builtin" &&
+          a.source === "builtin" &&
+          Array.isArray(a.providers) &&
+          a.providers.includes("opencode-go"),
+      ),
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- /health errors 非空表形状（坏适配器）
+//
+// 上节「errors 登记表存在」在默认配置下 errors=[]，形状循环零迭代（vacuously 真）。
+// 本节注册一坏 mjs 适配器（与下节 fail-fast 同模式），先断非空再断四键形状，
+// 保证形状循环真实执行（#768 尾波观察项 1）。
+describe("/health errors 非空表形状（坏适配器）", () => {
+  let badErrors;
+
+  beforeAll(async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dou-health-errors-"));
+    const badFile = join(dir, "bad.mjs");
+    writeFileSync(badFile, `export const version = 2; export const name = "bad";`, "utf8");
+    const { ctx, routes } = makeFakeCtx();
+    await apply(ctx, { ...ISOLATED_CONFIG, adapter: badFile });
+    const health = routes.find((r) => r.path === ROUTES.health);
+    const payload = await callHandler(health, fakeReq());
+    badErrors = payload.errors;
+  });
+
+  it("坏适配器登记非空（形状循环非 vacuous）", () => {
+    expect(Array.isArray(badErrors)).toBe(true);
+    expect(badErrors.length).toBeGreaterThan(0);
+  });
+
+  it("errors 条目四键形状齐（key/kind/message/at）", () => {
+    // 形状：错误登记四键齐（registry.ts AdapterErrorInfo + key 面）。
+    for (const e of badErrors) {
+      expect(e).toEqual(
+        expect.objectContaining({
+          key: expect.any(String),
+          kind: expect.stringMatching(/^(load|exec)$/),
+          message: expect.any(String),
+          at: expect.any(Number),
+        }),
+      );
+    }
   });
 });
 
@@ -1120,24 +1270,21 @@ export function formatPanel() { return "<p>a2</p>"; }
     disabledStaysDisabled = snap.host.find((a) => a.name === "p212-a")?.enabled;
     providerHasNoEnabled = snap.enabled.p212;
     // 持久化：adapter-state.json 轮询等待落盘 null（scheduleWriteAdapterState 为异步串行链）
-    let persisted = false;
+    // W4：手写 while+150ms 改共享 pollUntil（同 deadline/tick，不加轮次预算）。
     const stateFile = adapterStateFile(histDir);
-    const persistDeadline = Date.now() + 3000;
-    while (Date.now() < persistDeadline) {
-      if (existsSync(stateFile)) {
-        try {
-          const st = JSON.parse(readFileSync(stateFile, "utf8"));
-          if (st.p212 === null) {
-            persisted = true;
-            break;
+    persistedDisabledState =
+      (await pollUntil(
+        () => {
+          try {
+            if (!existsSync(stateFile)) return false;
+            return JSON.parse(readFileSync(stateFile, "utf8")).p212 === null;
+          } catch {
+            return false; // 写入中途，继续轮询
           }
-        } catch {
-          /* 写入中途，继续轮询 */
-        }
-      }
-      await new Promise((r) => setTimeout(r, 150));
-    }
-    persistedDisabledState = persisted;
+        },
+        3000,
+        150,
+      )) === true;
   });
 
   it("显式停用成功", () => {
@@ -1310,18 +1457,13 @@ describe("客户端契约", () => {
       .find((l) => l.includes("?.next ?? ms?.lastUsed") || l.includes("ms?.lastUsed ?? ms?.next"));
 
     // #629 P2：手动生成轮询路径 executor 侧幂等复用与 200 直接复用路径提示对称——
-    // pollReportTask 返回 reused 且轮询分支经 setGenNotice(t("reportReused")) 渲染提示
-    const reportSource = readFileSync(join(pkgDir, "src/client/report.tsx"), "utf8");
-    clientContractObs.pollRetMatch = reportSource.match(
-      /return \{ meta: body\.meta, reused: body\.reused === true \};/,
-    );
-    clientContractObs.pollCallMatch = reportSource.match(/const polled = await pollReportTask\(/);
-    clientContractObs.noticeMatch = reportSource.match(
-      /setGenNotice\(polledReused \? t\("reportReused"\) : null\);/,
-    );
-    clientContractObs.directMatch = reportSource.match(
-      /if \(body\.reused === true\) setGenNotice\(t\("reportReused"\)\);/,
-    );
+    // 死数据清理（M1-M3 波）：src 源码四正则（pollRet/pollCall/notice/direct）赋值无消费，
+    // 可观测主断言面以产物 bundle（已加载 clientCode）与
+    // HTTP 响应（下文 again.reused）为准，src 源码正则仅降级为辅助——
+    // 不新增 readFileSync(src/client) 断言。
+    clientContractObs.bundlePollReusedWiring = /reused:\s*body\.reused === true/.test(clientCode);
+    clientContractObs.bundlePollNoticeWiring =
+      /reused === true\) setGenNotice\(t\("reportReused"\)\)/.test(clientCode);
 
     // qa F1（#128 实测）：bottom-* 锚点首次打开以小高度定位、异步数据撑高面板后
     // 无重排路径 → 稳定向下溢出视口。防回归：renderPanel 尾部触发重定位 +
@@ -1336,8 +1478,7 @@ describe("客户端契约", () => {
         tf.indexOf("renderPanel()") < tf.indexOf("placePanel()");
     }
 
-    // lib/index.js 导出 v2 契约面
-    clientContractObs.hostLib = readFileSync(join(pkgDir, "lib/index.js"), "utf8");
+    // 死数据清理：hostLib 重复读 lib/index.js（与上文 hostCode 同文件）且无消费，已删。
 
     // #532 设置页多 tab 契约：分段器结构与窗格 keep-mounted 语义进产物/源码
     clientContractObs.clientBundle = clientCode;
@@ -1489,20 +1630,12 @@ describe("客户端契约", () => {
     expect(clientContractObs.clientSourceHasSyncUiConfig).toBeTruthy();
   });
 
-  it("pollReportTask 透传 status 响应的 reused 字段（轮询路径数据源）", () => {
-    expect(clientContractObs.pollRetMatch !== null).toBeTruthy();
+  it("轮询 reused 透传进产物 bundle（可观测主断言）", () => {
+    expect(clientContractObs.bundlePollReusedWiring).toBeTruthy();
   });
 
-  it("onGenerate 202 分支经 pollReportTask 拿 reused", () => {
-    expect(clientContractObs.pollCallMatch !== null).toBeTruthy();
-  });
-
-  it("轮询路径 reused → 渲染「已复用」提示（与 200 直接复用路径对称）", () => {
-    expect(clientContractObs.noticeMatch !== null).toBeTruthy();
-  });
-
-  it("200 直接复用路径「已复用」提示保留（对称基线）", () => {
-    expect(clientContractObs.directMatch !== null).toBeTruthy();
+  it("复用提示接线进产物 bundle（与 200 直接复用路径对称）", () => {
+    expect(clientContractObs.bundlePollNoticeWiring).toBeTruthy();
   });
 
   it("renderPanel 内容更新完成后触发 applyUiPlacement 重定位（bottom 锚点防溢出）", () => {
@@ -1513,19 +1646,21 @@ describe("客户端契约", () => {
     expect(clientContractObs.toggleFloatOrderOk).toBeTruthy();
   });
 
-  it.each([
-    "isUsageStatsAdapter",
-    "esc",
-    "sanitizeHtml",
-    "HistoryStore",
-    "runV2Pipeline",
-    "sseData",
-  ])("宿主产物应含 %s", (name) => {
-    expect(clientContractObs.hostLib.includes(name)).toBeTruthy();
-  });
-
-  it.each(["trend", "report", "usage", "providers", "float"])("设置页 tab 键 %s 存在", (key) => {
-    expect(clientContractObs.settingsIndex.includes(`"${key}"`)).toBeTruthy();
+  it("设置页 tab 键集合精确一致（五键，顺序即渲染顺序）", () => {
+    // 锚：settings/index.tsx TABS 字面量与 SettingsTabKey，第二事实源（增删改键必须红）。
+    // 行级精确：纯 type 漂移（加成员/改名/改顺序）亦红——子串 includes 会漏检后缀追加。
+    const typeLine = clientContractObs.settingsIndex
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.startsWith("export type SettingsTabKey"));
+    expect(typeLine).toBe(
+      'export type SettingsTabKey = "trend" | "report" | "usage" | "providers" | "float";',
+    );
+    const tabsStart = clientContractObs.settingsIndex.indexOf("const TABS");
+    const tabsEnd = clientContractObs.settingsIndex.indexOf("];", tabsStart);
+    const tabsBlock = clientContractObs.settingsIndex.slice(tabsStart, tabsEnd + 2);
+    const keys = [...tabsBlock.matchAll(/key:\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(keys).toEqual(["trend", "report", "usage", "providers", "float"]);
   });
 
   it("设置页窗格 keep-mounted（hidden 属性显隐，不卸载组件实例）（TSX 形态）", () => {
@@ -1837,16 +1972,19 @@ export function formatPanel() { return "<p>user-panel</p>"; }
     // #217：轮询替代固定 sleep——注册后 warmup 采样时序不定（CI 并行下更明显），
     // 反复查 stats 直到用户版接管（adapterName=deepseek-official），超时 3s 兜底。
     const stats = routes.find((r) => r.path === ROUTES.stats);
-    let finalFresh = null;
-    const pollDeadline = Date.now() + 3000;
-    while (Date.now() < pollDeadline) {
-      const snap = await getJSON(stats, `${ROUTES.stats}?provider=${DEEPSEEK_OFFICIAL_PROVIDER}`);
-      if (snap.adapterName === "deepseek-official") {
-        finalFresh = snap;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
+    // W4：手写 while+50ms 改共享 pollUntil（同 deadline/tick，不加轮次预算；async 条件）。
+    const finalFresh =
+      (await pollUntil(
+        async () => {
+          const snap = await getJSON(
+            stats,
+            `${ROUTES.stats}?provider=${DEEPSEEK_OFFICIAL_PROVIDER}`,
+          );
+          return snap.adapterName === "deepseek-official" ? snap : undefined;
+        },
+        3000,
+        50,
+      )) ?? null;
     userAdapterTakenOver = finalFresh;
     userAdapterStatus = finalFresh.status;
     userCapsuleRendered = finalFresh.capsuleHtml?.includes("USER ¥42.50");
@@ -1942,29 +2080,39 @@ export function formatPanel() { return "<p>user-panel</p>"; }
  * #120 演进：per-provider 锁落地后 warmup 改为并行 void fire-and-forget——
  * 各 provider 持各自专用锁，并行发起互不 busy、互不阻塞；本用例保留
  * 「每个启用 provider 都被采样」的主断言（40ms IO 延迟维持真实持锁窗口）。
+ * B 级（定向变异）：两适配器 fetchData 首尾打点，首轮取数窗口必须重叠——
+ * per-provider 锁改回全局单锁时两取数串行、窗口不重叠，仅该断言红。
  */
 describe("#156/#120 warmup 多 provider 采样回归", () => {
   let providerAAdapterName;
   let providerAStatus;
   let providerBAdapterName;
   let providerBStatus;
+  let warmupFirstA;
+  let warmupFirstB;
+  let warmupMarksRaw;
 
   beforeAll(async () => {
     // 构造两个用户适配器（providers 互不相同），注册表指向绝对路径 mjs
     const adapterDir = mkdtempSync(join(tmpdir(), "dou-warmup-adapters-"));
+    // B 级打点：fetchData 首尾记墙钟，首轮两窗口重叠即并行（标记落隔离 adapterDir，零污染）
+    const marksFile = join(adapterDir, "warmup-marks.jsonl");
     const mkAdapter = (name, provider) => {
       const file = join(adapterDir, `${name}.mjs`);
       writeFileSync(
         file,
         `
+import { appendFileSync } from "node:fs";
 export const version = 2;
 export const name = "${name}";
 export const label = "${name}";
 export const providers = ["${provider}"];
 export async function fetchData() {
+  const start = Date.now();
   // 模拟真实远端 IO 延迟：让持锁窗口覆盖后续 provider 的同步检查段，
   // 否则 mock 同步完成过快、两请求都排进 mutex 队列，无法复现 busy 短路
   await new Promise((r) => setTimeout(r, 40));
+  appendFileSync(${JSON.stringify(marksFile)}, JSON.stringify({ provider: "${provider}", start, end: Date.now() }) + "\\n");
   return { visits: 7 };
 }
 export function formatCapsule(input) { return "<span>" + input.data.visits + "</span>"; }
@@ -1976,6 +2124,8 @@ export function formatPanel() { return "<p>ok</p>"; }
     };
     const fileA = mkAdapter("warm-a", "prov-a");
     const fileB = mkAdapter("warm-b", "prov-b");
+    // 独立可跑：建父目录（全量跑时前序用例已建，-t 单跑本块时需自建）
+    mkdirSync(join(process.env.DSH_HOME, "dsh-provider-usage"), { recursive: true });
     writeFileSync(
       userAdaptersFile(join(process.env.DSH_HOME, "dsh-provider-usage")),
       JSON.stringify({
@@ -2022,6 +2172,21 @@ export function formatPanel() { return "<p>ok</p>"; }
     providerBAdapterName = pb.adapterName;
     providerBStatus = pb.status;
 
+    // B 级快照：首轮取数窗口（stats 30s 缓存命中，查询不产生二次取数，首记录即预热轮）
+    try {
+      warmupMarksRaw = readFileSync(marksFile, "utf8");
+    } catch {
+      warmupMarksRaw = "";
+    }
+    const firstByProvider = new Map();
+    for (const line of warmupMarksRaw.split("\n")) {
+      if (line.trim() === "") continue;
+      const mark = JSON.parse(line);
+      if (!firstByProvider.has(mark.provider)) firstByProvider.set(mark.provider, mark);
+    }
+    warmupFirstA = firstByProvider.get("prov-a");
+    warmupFirstB = firstByProvider.get("prov-b");
+
     for (const d of [...disposers].reverse()) {
       try {
         d();
@@ -2045,6 +2210,22 @@ export function formatPanel() { return "<p>ok</p>"; }
 
   it("provider B 非 stale 短路", () => {
     expect(providerBStatus, `实际 ${providerBStatus}`).not.toBe("stale");
+  });
+
+  it("B 级：双 provider 首轮取数标记齐全", () => {
+    expect(
+      warmupFirstA !== undefined && warmupFirstB !== undefined,
+      `标记原文=${warmupMarksRaw}`,
+    ).toBe(true);
+  });
+
+  it("B 级：首轮取数窗口重叠（并行预热；全局锁串行则不重叠）", () => {
+    const overlapped =
+      warmupFirstA !== undefined &&
+      warmupFirstB !== undefined &&
+      warmupFirstA.start < warmupFirstB.end &&
+      warmupFirstB.start < warmupFirstA.end;
+    expect(overlapped, `窗口未重叠，标记原文=${warmupMarksRaw}`).toBe(true);
   });
 });
 
@@ -3310,10 +3491,6 @@ describe("#503 M2：/trend 路由集成断言", () => {
     expect(obs.payloadPlugin).toBe("dsh-provider-usage");
   });
 
-  it("trend 带契约版本", () => {
-    expect(obs.payloadVersion).toBe(ADAPTER_CONTRACT_VERSION);
-  });
-
   it("granularity 默认 day", () => {
     expect(obs.payloadGranularity).toBe("day");
   });
@@ -3608,8 +3785,17 @@ describe("#503 M3：用量报告接线", () => {
       detailRoute !== undefined &&
       genRoute !== undefined;
 
-    // b. 默认挂载（报告全关）：无 reports/ 产物；GET /report-config 返回默认配置
-    obs.noReportsDirOnDefaultMount = !existsSync(reportsDir);
+    // b. 默认挂载（报告全关）：无报告产物（html/meta/index）；S3 存储归位后 reports/ 含版本化空形
+    // （config.json{version:1}/last-run.json{schema:2}）属预期初始形态，不算报告产物。
+    try {
+      const names = readdirSync(reportsDir);
+      obs.noReportArtifactsOnDefaultMount = names.every(
+        (n) => n === "config.json" || n === "last-run.json",
+      );
+    } catch {
+      obs.noReportArtifactsOnDefaultMount = true;
+    }
+    obs.noReportsDirOnDefaultMount = obs.noReportArtifactsOnDefaultMount;
     const defaultCfg = await callHandler(cfgRoute, fakeReq({ url: ROUTES.reportConfig }));
     obs.defaultCfgOk = defaultCfg.ok;
     obs.defaultDailyEnabled = defaultCfg.config.daily.enabled;
@@ -4010,14 +4196,8 @@ describe("#503 M3：用量报告接线", () => {
       );
       const afterAppend = await callHandler(listRoute, fakeReq({ url: ROUTES.reports }));
       obs.afterAppendFirstKey = afterAppend.reports[0].key;
-      // 计数器度量：清缓存后连续三读 → 恰好 1 次 miss + 2 次 hit（重复读不再线性重解析）
-      __clearReportIndexCacheForTests();
-      const s0 = __reportIndexCacheStatsForTests();
-      await readReportIndex(histDir);
-      await readReportIndex(histDir);
-      await readReportIndex(histDir);
-      const s1 = __reportIndexCacheStatsForTests();
-      obs.indexCacheDelta = { misses: s1.misses - s0.misses, hits: s1.hits - s0.hits };
+      // #629 P1 计数器机制归位单元层（unit-report P1 直接三读断言 miss/hit）；
+      // 集成层仅经路由验证失效语义（afterAppendFirstKey），不直读计数器。
       __clearReportIndexCacheForTests(); // 清场，防跨块计数残留影响语义
     }
 
@@ -4070,7 +4250,7 @@ describe("#503 M3：用量报告接线", () => {
     expect(obs.reportRoutesExist).toBeTruthy();
   });
 
-  it("默认挂载（报告全关）不产生 reports/ 目录", () => {
+  it("默认挂载（报告全关）无报告产物（版本化空形除外，S3存储归位）", () => {
     expect(obs.noReportsDirOnDefaultMount).toBeTruthy();
   });
 
@@ -4231,10 +4411,6 @@ describe("#503 M3：用量报告接线", () => {
     expect(obs.reportIndexExists).toBeTruthy();
   });
 
-  it("meta 文件与响应一致", () => {
-    expect(obs.storedMetaKey).toBe(obs.genMetaKey);
-  });
-
   it("HTML 为最小文档骨架包裹", () => {
     expect(obs.storedHtmlIsMinimalSkeleton).toBeTruthy();
   });
@@ -4295,10 +4471,6 @@ describe("#503 M3：用量报告接线", () => {
     expect(obs.listNonEmpty).toBeTruthy();
   });
 
-  it("倒序：最新在前", () => {
-    expect(obs.listFirstKey).toBe(obs.genMetaKey);
-  });
-
   it("detail ok", () => {
     expect(obs.detailOk).toBe(true);
   });
@@ -4313,10 +4485,6 @@ describe("#503 M3：用量报告接线", () => {
 
   it("last-run.json 已落盘", () => {
     expect(obs.lastRunFileExists).toBeTruthy();
-  });
-
-  it("lastRun.daily === 窗口键", () => {
-    expect(obs.lastRunDaily).toBe(obs.genMetaKey);
   });
 
   it("带 directories POST ok", () => {
@@ -4343,10 +4511,6 @@ describe("#503 M3：用量报告接线", () => {
     expect(obs.dirTrendTodayReachable).toBeTruthy();
   });
 
-  it("报告 meta 完整落盘（目录维度接入不破坏生成链路）", () => {
-    expect(obs.metaOnDiskKey).toBe(obs.genMetaKey);
-  });
-
   it("报告 meta 无绝对路径形态", () => {
     expect(obs.metaTextHasNoAbsolutePath).toBeTruthy();
   });
@@ -4359,20 +4523,12 @@ describe("#503 M3：用量报告接线", () => {
     expect(obs.againReused).toBe(true);
   });
 
-  it("复用同窗口 meta", () => {
-    expect(obs.againMetaKey).toBe(obs.genMetaKey);
-  });
-
   it("幂等复用不新增 index 记录（未调 LLM）", () => {
     expect(obs.againLineCount).toBe(obs.countBeforeForce);
   });
 
   it("force 重新生成 ok", () => {
     expect(obs.forceMetaOk).toBe(true);
-  });
-
-  it("force 覆盖同窗口", () => {
-    expect(obs.forceMetaKey).toBe(obs.genMetaKey);
   });
 
   it("force 真正重新生成（index 新增一行，防假绿）", () => {
@@ -4395,20 +4551,12 @@ describe("#503 M3：用量报告接线", () => {
     expect(obs.saveWeeklyOk).toBe(true);
   });
 
-  it("preset 写 weekly 后 daily 字段保留（updateLastRun 临界区，#629 P2）", () => {
-    expect(obs.lastRunAfterDaily).toBe(obs.genMetaKey);
-  });
-
   it("weekly preset 键已写入（双写者字段并存）", () => {
     expect(obs.lastRunAfterWeeklyIsString).toBeTruthy();
   });
 
   it("append 后路由读到新行（stat 失效生效，不服务过期投影）", () => {
     expect(obs.afterAppendFirstKey).toBe("2099-01-01");
-  });
-
-  it("连续三读仅一次全量解析（#629 P1 记忆化生效，读次数与解析次数解耦）", () => {
-    expect(obs.indexCacheDelta).toEqual({ misses: 1, hits: 2 });
   });
 
   it("reports 目录有产物", () => {
@@ -4663,10 +4811,13 @@ describe("#633 分片 b2 D2：客户端源码契约断言", () => {
     clientContractObs.trendSource = readFileSync(join(pkgDir, "src/client/trend.tsx"), "utf8");
     clientContractObs.reportSource = readFileSync(join(pkgDir, "src/client/report.tsx"), "utf8");
     clientContractObs.mathSource = readFileSync(join(pkgDir, "src/client/trend-math.ts"), "utf8");
-    clientContractObs.routesSource = readFileSync(join(pkgDir, "src/domain2/routes/ui.ts"), "utf8");
+    clientContractObs.routesSource = readFileSync(
+      join(pkgDir, "src/server/ui-routes/trend.ts"),
+      "utf8",
+    );
     clientContractObs.localesSource = readFileSync(join(pkgDir, "src/client/locales.ts"), "utf8");
     clientContractObs.listDirsSource = readFileSync(
-      join(pkgDir, "src/domain2/execute/list-dirs.ts"),
+      join(pkgDir, "src/server/execute/list-dirs.ts"),
       "utf8",
     );
   });

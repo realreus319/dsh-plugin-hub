@@ -32,6 +32,18 @@
       "reason": "变异段台账的判据（--check）只在它的自测里被调用，而该测试在 test:scripts 面内、每个 PR 都跑——判据确实执行，但执行点不在任何 workflow 的 run 步骤里，故按 indirect 登记而非 library"
     },
     {
+      "endpoint": "script:tools/lint/fixtures/lint-probe-fixture.ts",
+      "class": "indirect",
+      "via": "scripts/test/lint-toolchain.test.ts",
+      "reason": "A5 棘轮探针固件（稳定 2 处发现）：只在 lint-toolchain 自测里被 lint.mjs 显式 spawn，判据确实执行，但执行点不在任何 workflow 的 run 步骤里，故按 indirect 登记而非 library"
+    },
+    {
+      "endpoint": "script:tools/lint/fixtures/lint-probe-clean-fixture.ts",
+      "class": "indirect",
+      "via": "scripts/test/lint-toolchain.test.ts",
+      "reason": "A5 子集口径探针固件（零发现对照）：同上，只在 lint-toolchain 自测里被显式 spawn，故按 indirect 登记而非 library"
+    },
+    {
       "endpoint": "script:scripts/gate/collect-exemptions.mjs",
       "class": "tier-only",
       "reason": "豁免到期台账是纯报告（退出码恒 0），只在本地 full 档收集打印——pr 档不跑（#765 裁决：PR 上反复打印同一份存量台账只会变成噪音），CI 侧也没有对应执行点"
@@ -193,7 +205,7 @@
       "step": "ci.yml|changes|base",
       "digest": "c82d977b493825ee",
       "reason": "已登记条件 `steps.base.outputs.base != ''` 的操作数来自这一步的 output（`steps.base.outputs.*`）；登记它的文本摘要，等于把「条件成立与否的输入面」也钉住——把产出改掉（例如 COUNT=0）会让条件永不成立，而条件原文一字不动",
-      "inputsDigest": "e408c869964dc3d9",
+      "inputsDigest": "bdf07845297cd528",
       "producersDigest": "e3b0c44298fc1c14"
     },
     {
@@ -428,7 +440,7 @@
     },
     {
       "job": "ci.yml|changes",
-      "digest": "6dfc849ca37fea60"
+      "digest": "4a30981dcc03e53f"
     },
     {
       "job": "ci.yml|coverage",

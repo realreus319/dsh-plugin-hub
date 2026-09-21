@@ -3,10 +3,9 @@
  * dsh-provider-usage — unit：契约辅助纯函数。
  *
  * 覆盖：safeSegment（路径安全段）、sseData（SSE 序列化）、
- * parseUserAdapters（防御式解析）、summarizeTextFromWindows /
- * levelFromWindows（v1 废弃但保留的辅助函数）、esc（HTML 转义）、
+ * parseUserAdapters（防御式解析）、esc（HTML 转义）、
  * isUsageStatsAdapter / describeUsageStatsAdapterShape（v2 契约校验全分支，
- * #150 变异驱动加固）。
+ * #150 变异驱动加固）。v1 辅助函数已随 #932 删除，其断言同步移除。
  */
 console.error("EVAL-ORDER-TAG: CONTRACT");
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -15,30 +14,34 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { beforeAll, describe, expect, it } from "vitest";
+import { sseData } from "../../../src/apply/index.ts";
+// 白盒直连深路径（#768 B波）：契约版本经 shared 门面，不走组合根转发。
+import { ADAPTER_CONTRACT_VERSION } from "../../../src/shared/interface.ts";
+import { parseUserAdapters } from "../../../src/server/registry/interface.ts";
+// 白盒直连深路径（#768 B波）：契约/净化纯面经 shared 门面，不走组合根转发。
 import {
-  safeSegment,
-  sseData,
-  parseUserAdapters,
-  summarizeTextFromWindows,
-  levelFromWindows,
   esc,
   isUsageStatsAdapter,
+  sanitizeHtml,
   describeUsageStatsAdapterShape,
-  ADAPTER_CONTRACT_VERSION,
-  ERROR_CODES,
-} from "../../../src/apply/index.ts";
+} from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：契约常量/路径段经 shared 门面，不走组合根转发（sseData单议暂留）。
+import { safeSegment, ERROR_CODES } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：历史存储经历史域门面，不走组合根转发。
+import { HistoryStore } from "../../../src/server/history/interface.ts";
+import { miniChartSvgMarkup } from "../../../src/server/adapters/interface.ts";
 import {
   makeAdapterRegistry,
-  sanitizeHtml,
+  readStamp,
+  stampEqual,
+} from "../../../src/server/registry/interface.ts";
+// 白盒直连深路径（#768 B波续批）：管线纯面经域门面，不走组合根转发。
+import {
   safeFetchData,
   safeFormat,
   runV2Pipeline,
   runV2PanelPipeline,
-  HistoryStore,
-  readStamp,
-  stampEqual,
-  miniChartSvgMarkup,
-} from "../../../src/apply/index.ts";
+} from "../../../src/server/pipeline/interface.ts";
 
 describe("safeSegment", () => {
   it("字母数字连字符原样保留", () => {
@@ -165,101 +168,6 @@ describe("parseUserAdapters", () => {
     expect(
       parseUserAdapters('{"adapters": [{"id":"a","providers":["p1",""],"file":"/x.mjs"}]}'),
     ).toEqual([{ id: "a", label: "a", providers: ["p1"], file: "/x.mjs" }]);
-  });
-});
-
-describe("summarizeTextFromWindows (deprecated)", () => {
-  it("undefined 窗口返回空", () => {
-    expect(summarizeTextFromWindows(undefined)).toBe("");
-  });
-
-  it("空数组返回空", () => {
-    expect(summarizeTextFromWindows([])).toBe("");
-  });
-
-  it("单窗口百分比展示", () => {
-    expect(summarizeTextFromWindows([{ key: "5h", name: "5h 滚动", percent: 5 }])).toBe(
-      "5h 滚动 5%",
-    );
-  });
-
-  it("整百分比无小数", () => {
-    expect(summarizeTextFromWindows([{ key: "w", name: "每周", percent: 80 }])).toBe("每周 80%");
-  });
-
-  it("null 百分比显示 --", () => {
-    expect(
-      summarizeTextFromWindows([
-        { key: "r", name: "5h 滚动", percent: 5 },
-        { key: "w", name: "每周", percent: null },
-      ]),
-    ).toBe("5h 滚动 5% · 每周 --");
-  });
-});
-
-describe("levelFromWindows (deprecated)", () => {
-  it("undefined 窗口返回 off", () => {
-    expect(levelFromWindows(undefined)).toBe("off");
-  });
-
-  it("空数组返回 off", () => {
-    expect(levelFromWindows([])).toBe("off");
-  });
-
-  it("10% → ok", () => {
-    expect(levelFromWindows([{ key: "r", percent: 10 }])).toBe("ok");
-  });
-
-  it("80% → warn", () => {
-    expect(levelFromWindows([{ key: "r", percent: 80 }])).toBe("warn");
-  });
-
-  it("95% → err", () => {
-    expect(levelFromWindows([{ key: "r", percent: 95 }])).toBe("err");
-  });
-
-  it("100% → err", () => {
-    expect(levelFromWindows([{ key: "r", percent: 100 }])).toBe("err");
-  });
-
-  it("null 百分比 → off", () => {
-    expect(levelFromWindows([{ key: "r", percent: null }])).toBe("off");
-  });
-
-  it("多窗口取最差（90 → warn，≥80 即为 warn）", () => {
-    expect(
-      levelFromWindows([
-        { key: "r", percent: 10 },
-        { key: "w", percent: 90 },
-      ]),
-    ).toBe("warn");
-  });
-
-  it("非数组输入返回 off（#150）", () => {
-    expect(levelFromWindows("not array" as unknown as Parameters<typeof levelFromWindows>[0])).toBe(
-      "off",
-    );
-  });
-
-  it("79.9 < 80 → ok 边界（#150）", () => {
-    expect(levelFromWindows([{ key: "r", percent: 79.9 }])).toBe("ok");
-  });
-
-  it("94.9 < 95 → warn 边界（#150）", () => {
-    expect(levelFromWindows([{ key: "r", percent: 94.9 }])).toBe("warn");
-  });
-
-  it("缺 percent 字段 → off（#150）", () => {
-    expect(levelFromWindows([{ key: "r" }])).toBe("off");
-  });
-
-  it("null 混合窗口只计数值项（#150）", () => {
-    expect(
-      levelFromWindows([
-        { key: "r", percent: 30 },
-        { key: "w", percent: null },
-      ]),
-    ).toBe("ok");
   });
 });
 
@@ -1472,22 +1380,9 @@ describe("hotreload：start 文件缺失失败回调；pollOnce 文件删除保�
 
 // ================================================================ #150 二阶段：图表纯函数结构断言（miniChartSvgMarkup）
 
-describe("miniChartSvgMarkup 图表纯函数结构断言", () => {
-  // 样本不足 2 点 → 空 SVG
-  it("样本 <2 返回空串", () => {
-    expect(
-      miniChartSvgMarkup({
-        samples: [{ x: 1, y: 50 }],
-        color: "#fff",
-        lo: 0,
-        hi: 100,
-        resetsAt: undefined,
-        resetPeriodMs: 0,
-        dateOnly: false,
-      }),
-    ).toBe("");
-  });
-
+// H7 审计例外：本块为 v1 miniChart 块的简化版，重复面已删，仅留 v1 未覆盖的独有 facet
+// （网格三线精确计数/重置外推历史≥2/garbage 输入/体积护栏/贝塞尔形状），已上报主控。
+describe("miniChartSvgMarkup 独有 facet（H7 审计例外保留）", () => {
   // 基本结构：svg 包裹 + 平滑曲线 + 终点圆点 + 网格线
   describe("基本结构：svg 包裹 + 平滑曲线 + 终点圆点 + 网格线", () => {
     let svg, gridLines;
@@ -1512,69 +1407,9 @@ describe("miniChartSvgMarkup 图表纯函数结构断言", () => {
       gridLines = svg.split("stroke-dasharray:3 3").length - 1;
     });
 
-    it("SVG 开头", () => {
-      expect(svg.startsWith("<svg")).toBeTruthy();
-    });
-
-    it("视口尺寸固定", () => {
-      expect(svg.includes('viewBox="0 0 320 100"')).toBeTruthy();
-    });
-
-    it("曲线使用传入色", () => {
-      expect(svg.includes("stroke:#123456")).toBeTruthy();
-    });
-
-    it("终点圆点存在", () => {
-      expect(svg.includes("<circle")).toBeTruthy();
-    });
-
+    // 独有 facet：v1 只断参考线/刻度样式，未计数 lo/mid/hi 三网格线
     it("网格虚线恰三条（lo/中位/hi 各一）", () => {
       expect(gridLines).toBe(3);
-    });
-
-    it("lo=0/hi=100 满足 lo<=100<=hi 且域宽>0.01 → 参考线存在", () => {
-      expect(svg.includes("100%")).toBeTruthy();
-    });
-  });
-
-  describe("domain 含 100% 参考线", () => {
-    let noRefLine, withRefLine;
-
-    beforeAll(() => {
-      // hi=80 时 100% 线不可见；hi<100 且 dmax>=90 强制抬到 100 的行为经 niceDomain 间接生效
-      const t0 = Date.UTC(2026, 0, 1, 0, 0);
-      noRefLine = miniChartSvgMarkup({
-        samples: [
-          { x: t0, y: 10 },
-          { x: t0 + 60000, y: 60 },
-        ],
-        color: "#000",
-        lo: 0,
-        hi: 50,
-        resetsAt: undefined,
-        resetPeriodMs: 0,
-        dateOnly: true,
-      });
-      withRefLine = miniChartSvgMarkup({
-        samples: [
-          { x: t0, y: 10 },
-          { x: t0 + 60000, y: 95 },
-        ],
-        color: "#000",
-        lo: 0,
-        hi: 100,
-        resetsAt: undefined,
-        resetPeriodMs: 0,
-        dateOnly: true,
-      });
-    });
-
-    it("hi=50 < 100 时无 100% 参考线", () => {
-      expect(noRefLine.includes("100%") === false).toBeTruthy();
-    });
-
-    it("hi=100 且域宽 >0.01 时有 100% 参考线", () => {
-      expect(withRefLine.includes("100%")).toBeTruthy();
     });
   });
 
@@ -1631,7 +1466,7 @@ describe("miniChartSvgMarkup 图表纯函数结构断言", () => {
 
   // downsample：>300 点降采样后仍 ≤301 点且保留末点
   describe("downsample：>300 点降采样", () => {
-    let circles, svg;
+    let svg;
 
     beforeAll(() => {
       const t0 = Date.UTC(2026, 0, 1, 0, 0);
@@ -1645,11 +1480,6 @@ describe("miniChartSvgMarkup 图表纯函数结构断言", () => {
         resetPeriodMs: 0,
         dateOnly: true,
       });
-      circles = svg.split("<circle").length - 1;
-    });
-
-    it("降采样后仍只有一个终点圆点（渲染未崩）", () => {
-      expect(circles).toBe(1);
     });
 
     // 仅作退化护栏（防止降采样失效导致体积爆炸的非线性增长），非精确口径：
@@ -1680,12 +1510,9 @@ describe("miniChartSvgMarkup 图表纯函数结构断言", () => {
       });
     });
 
+    // 独有 facet：v1 不断 path 平滑形状（C vs 折线 L 变异）
     it("两点曲线走三次贝塞尔（平滑）", () => {
       expect(svg.includes("C ")).toBeTruthy();
-    });
-
-    it("面积图填充透明度存在", () => {
-      expect(svg.includes("fill-opacity:.13")).toBeTruthy();
     });
   });
 });

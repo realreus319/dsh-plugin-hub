@@ -12,14 +12,15 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { beforeEach, describe, expect, it } from "vitest";
+// 白盒直连深路径（#768 B波续批）：读面经域门面，不走组合根转发。
 import {
-  makeDueReportExecutor,
+  DEFAULT_REPORT_CONFIG,
   ReportConfigService,
   readReportConfig,
-  DEFAULT_REPORT_CONFIG,
-  readLastRun,
-} from "../../../src/apply/index.ts";
-import { makeListDirs } from "../../../src/domain2/execute/list-dirs.ts";
+} from "../../../src/server/config/interface.ts";
+import { readLastRun, updateLastRun } from "../../../src/server/schedule/interface.ts";
+import { makeDueReportExecutor } from "../../../src/server/execute/interface.ts";
+import { makeListDirs } from "../../../src/server/execute/list-dirs.ts";
 
 describe("ReportConfigService：串行写链 / 内存权威 / 回调顺序 / 磁盘 roundtrip", () => {
   let root: string;
@@ -106,8 +107,10 @@ describe("executor 幂等短路：index 已有成功记录且非 force → 复�
       trend: {},
       ctx: {},
       getReportCfg: () => normalizeCfg({}),
+      getPromptTemplate: () => "prompt",
       historyRoot: root,
       sanitizeDiagnostic: (s) => `SAN:${s}`,
+      advanceLastRun: updateLastRun,
     });
     res = await executor({
       period: "daily",

@@ -2,9 +2,11 @@
 /**
  * dsh-provider-usage — unit：apply 宿主注入路径覆盖。
  *
- * 覆盖：installSettingsNamespace inject 回调全分支（含 isUnloading）、
- * HotReloadableAdapter onReload 回调分支、dispose 清理全分支、
- * sseClients 清理、warmupTimer 清理。
+ * 覆盖：installSettingsNamespace inject 回调分支、
+ * HotReloadableAdapter onReload 回调分支、warmup/prune 定时器清理（假时钟句柄计数）。
+ *
+ * P1 恒真（`flag=true` 无条件置位）用例已删：5a/5b isUnloading、7) dispose、
+ * 8) warmup 旧版；清理事实由 8) 句柄计数真断言与 schedule D3 toFake 面钉住。
  *
  * 此文件不重复 smoke.test.ts 已覆盖的 boot/enabled/fence 断言，仅专注
  * 于 smoke 未到达的 apply 内部分支（#82 批次 3）。
@@ -13,20 +15,21 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 console.error("EVAL-ORDER-TAG: APPLY");
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fs, { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { injectGlobalFetch } from "../../helpers.ts";
+import { injectGlobalFetch, pollUntil } from "../../helpers.ts";
+import { apply, ROUTES } from "../../../src/apply/index.ts";
+// 白盒直连深路径（#768 B波）：OpenCode 双值经适配器域门面，不走组合根转发。
 import {
-  apply,
-  ROUTES,
   OPENCODE_GO_PROVIDER,
   OPENCODE_GO_ADAPTER_ID,
-  ADAPTER_CONTRACT_VERSION,
-  fetchWithTimeout,
-  userAdaptersFile,
-  adapterStateFile,
-} from "../../../src/apply/index.ts";
+} from "../../../src/server/adapters/interface.ts";
+// 白盒直连深路径（#768 B波）：契约版本经 shared 门面，不走组合根转发。
+import { ADAPTER_CONTRACT_VERSION } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：用户适配器路径纯面经注册表域门面，不走组合根转发。
+import { userAdaptersFile, adapterStateFile } from "../../../src/server/registry/interface.ts";
+import { fetchWithTimeout } from "../../../src/server/pipeline/interface.ts";
 
 // ---------------------------------------------------------------- 工具：fakeReqs
 
@@ -136,15 +139,10 @@ export function formatPanel() { return "<p>${name}</p>"; }
 `;
 }
 
-/** 轮询直到条件成立或超时（防 flake：不使用固定 sleep 判定）。 */
-async function pollUntil(cond: () => boolean, timeoutMs = 2000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  return cond();
-}
+// W5：删本地 pollUntil，统一引用 test/helpers.ts 共享版。逐行比对（本地原 142-150 vs 共享 100-112），语义不同处以共享版为准：
+// - 本地 cond 仅同步 boolean，共享 cond 可 async 且泛型返回真值（以共享为准，本文件调用仍为同步 boolean 面，true/false 语义一致）；
+// - 本地默认 2000ms/10ms，共享默认 5000ms/50ms（以共享为准，本文件 6 处调用均无显式参数，统一放宽到共享口径）；
+// - 本地 deadline 前 while+末次 cond()，共享 deadline 后返回末次 v（以共享为准，保证至少一次求值，超时返回末次假值）。
 
 const routeOf = (routes: Array<Record<string, unknown>>, path: string) =>
   routes.find((r) => r.path === path) as
@@ -200,11 +198,20 @@ describe("1) inject 回调：settings 正常注册", () => {
         return typeof d === "function" ? d : () => {};
       },
     };
-    await apply(ctx, { apiKey: "sk-test", apiEndpoint: "http://127.0.0.1:9" });
+    // 隔离（#768 P1）：historyDir 指临时目录，否则 apply.ts:275 回落真实 ~/.dsh
+    // （installUpgrade 写 .upgrade-version、TrendTracker 建 trend 目录）。
+    const dir = mkdtempSync(join(tmpdir(), "dou-apply-inject-ok-"));
+    await apply(ctx, {
+      apiKey: "sk-test",
+      apiEndpoint: "http://127.0.0.1:9",
+      historyDir: join(dir, "hist"),
+    });
   });
 
   it("settings.register 被调用", () => {
-    expect(settingsEvents.includes("register-called")).toBeTruthy();
+    // 实现真值（shared/settings-namespace.js installSettingsNamespace）：
+    // register → sctx.effect → scope.watch 按序各推一事件，一次 inject 回调恰好三项。
+    expect(settingsEvents).toEqual(["register-called", "effect-registered", "watch-registered"]);
   });
 
   it("sctx.effect 被注册", () => {
@@ -261,7 +268,13 @@ describe("2) inject 回调：settings.register 抛错", () => {
         return typeof d === "function" ? d : () => {};
       },
     };
-    await apply(ctx, { apiKey: "sk-test", apiEndpoint: "http://127.0.0.1:9" });
+    // 隔离（#768 P1）：同 1)，无 historyDir 则回落真实 ~/.dsh 写版本与 trend 目录。
+    const dir = mkdtempSync(join(tmpdir(), "dou-apply-inject-throw-"));
+    await apply(ctx, {
+      apiKey: "sk-test",
+      apiEndpoint: "http://127.0.0.1:9",
+      historyDir: join(dir, "hist"),
+    });
   });
 
   it("settings.register 抛错应 warn", () => {
@@ -304,7 +317,13 @@ describe("3) inject 回调：settings 服务缺 register", () => {
         return typeof d === "function" ? d : () => {};
       },
     };
-    await apply(ctx, { apiKey: "sk-test", apiEndpoint: "http://127.0.0.1:9" });
+    // 隔离（#768 P1）：同 1)，无 historyDir 则回落真实 ~/.dsh 写版本与 trend 目录。
+    const dir = mkdtempSync(join(tmpdir(), "dou-apply-inject-noreg-"));
+    await apply(ctx, {
+      apiKey: "sk-test",
+      apiEndpoint: "http://127.0.0.1:9",
+      historyDir: join(dir, "hist"),
+    });
   });
 
   it("settings 缺 register 应 warn", () => {
@@ -317,117 +336,20 @@ describe("3) inject 回调：settings 服务缺 register", () => {
 // smoke.test.ts 已有的 apply 用 fake ctx 无 inject → installSettingsNamespace 走
 // "ctx.inject 不可用" 分支。本文件不重复。
 
-// ---------------------------------------------------------------- 5) isUnloading 全分支通过 inject 回调覆盖
-
-// 5a) fiber.state = "unloading" → sctx.effect disposer 内 isUnloading 返回 true →
-//     disposer 提前 return（setSource 不切回 entry）
-describe("5a) fiber.state=unloading → disposer 内 isUnloading=true 提前 return", () => {
-  let applied;
-
-  beforeAll(async () => {
-    const routes = [];
-    const ctx = {
-      logger: { warn: () => {} },
-      webServer: {
-        register(route) {
-          routes.push(route);
-          return () => {};
-        },
-      },
-      on: onStub,
-      llm: {
-        listProviders() {
-          return [];
-        },
-      },
-      fiber: { state: "unloading" },
-      inject: (deps, cb) => {
-        const scope = { get: () => ({}), watch: (_fn) => {} };
-        cb({
-          settings: { register: () => scope },
-          effect: (fn) => {
-            const disposer = fn();
-            // 模拟 fiber 卸载时调用 disposer：isUnloading(ctx) 应为 true → 提前 return
-            disposer();
-            return () => {};
-          },
-        });
-      },
-      effect: (fn) => {
-        const d = fn();
-        return typeof d === "function" ? d : () => {};
-      },
-    };
-    // setSource 应该在 register 成功后被设为 () => scope.get()，但 disposer 内
-    // isUnloading=true 时不会切回 entry。此处纯验证不抛错。
-    await apply(ctx, { apiKey: "sk-test", apiEndpoint: "http://127.0.0.1:9" });
-    applied = true;
-  });
-
-  it("isUnloading=true 分支不抛错", () => {
-    expect(applied).toBe(true);
-  });
-});
-
-// 5b) fiber.state = "disposed" → 同 unloading 分支
-describe("5b) fiber.state=disposed → 同 unloading 分支", () => {
-  let applied;
-
-  beforeAll(async () => {
-    const routes = [];
-    const ctx = {
-      logger: { warn: () => {} },
-      webServer: {
-        register(route) {
-          routes.push(route);
-          return () => {};
-        },
-      },
-      on: onStub,
-      llm: {
-        listProviders() {
-          return [];
-        },
-      },
-      fiber: { state: "disposed" },
-      inject: (deps, cb) => {
-        const scope = { get: () => ({}), watch: (_fn) => {} };
-        cb({
-          settings: { register: () => scope },
-          effect: (fn) => {
-            const disposer = fn();
-            disposer();
-            return () => {};
-          },
-        });
-      },
-      effect: (fn) => {
-        const d = fn();
-        return typeof d === "function" ? d : () => {};
-      },
-    };
-    await apply(ctx, { apiKey: "sk-test", apiEndpoint: "http://127.0.0.1:9" });
-    applied = true;
-  });
-
-  it("isUnloading=disposed 分支不抛错", () => {
-    expect(applied).toBe(true);
-  });
-});
-
 // ---------------------------------------------------------------- 6) HotReloadableAdapter onReload 回调全分支
 
 // 6a) 合法用户适配器文件 → onReload ok:true → hr.current !== null → full branch
 describe("6a) 合法用户适配器文件 → onReload ok:true", () => {
   let applied;
+  let dir;
 
   beforeAll(async () => {
-    const dir = mkdtempSync(join(tmpdir(), "dou-hr-"));
+    dir = mkdtempSync(join(tmpdir(), "dou-hr-"));
     const goodFile = join(dir, "good.mjs");
     writeFileSync(
       goodFile,
       `
-export const version = 2;
+export const version = ${ADAPTER_CONTRACT_VERSION};
 export const name = "hr-test";
 export const label = "HR Test";
 export const providers = ["${OPENCODE_GO_PROVIDER}"];
@@ -467,12 +389,18 @@ export function formatPanel() { return "<p>p</p>"; }
       autoReload: true,
       apiKey: "sk-test",
       apiEndpoint: "http://127.0.0.1:9",
+      // 隔离（#768 P1）：复用本块 mkdtemp 目录；不传则回落真实 ~/.dsh 写版本与 trend 目录。
+      historyDir: join(dir, "hist"),
     });
     applied = true;
   });
 
   it("HotReload ok:true 分支不抛错", () => {
     expect(applied).toBe(true);
+  });
+
+  it("隔离自检：落盘收敛在本块 hist 内（删 historyDir 参数即红）", () => {
+    expect(existsSync(join(dir, "hist"))).toBe(true);
   });
 });
 
@@ -514,6 +442,8 @@ describe("6b) 非法适配器文件 → onReload ok:false", () => {
       autoReload: true,
       apiKey: "sk-test",
       apiEndpoint: "http://127.0.0.1:9",
+      // 隔离（#768 P1）：复用本块 mkdtemp 目录；不传则回落真实 ~/.dsh 写版本与 trend 目录。
+      historyDir: join(dir, "hist"),
     });
     applied = true;
   });
@@ -523,136 +453,65 @@ describe("6b) 非法适配器文件 → onReload ok:false", () => {
   });
 });
 
-// ---------------------------------------------------------------- 7) dispose 清理全分支（含 hotReloaders + sseClients）
+// ---------------------------------------------------------------- 8) warmup/prune 定时器清理（假时钟句柄计数，真断言）
 
-describe("7) dispose 清理全分支（含 hotReloaders + sseClients）", () => {
-  let evRoute, disposed;
+// 时间纪律（testing skill §4）：显式声明 toFake 面，只伪造 setInterval/clearInterval
+// （Date/setTimeout 保持真实）。P1 恒真版（`cleared=true` 无条件置位，不抛错即绿）已删，
+// 清理事实改由句柄计数钉住：不清 clearInterval 即泄漏，归零断言红。
 
-  beforeAll(async () => {
-    const dir = mkdtempSync(join(tmpdir(), "dou-dispose-"));
-    const goodFile = join(dir, "dispose.mjs");
-    writeFileSync(
-      goodFile,
-      `
-export const version = 2;
-export const name = "dispose-test";
-export const label = "Dispose";
-export const providers = ["${OPENCODE_GO_PROVIDER}"];
-export async function fetchData() { return { v: 1 }; }
-export function formatCapsule() { return "<span>ok</span>"; }
-export function formatPanel() { return "<p>p</p>"; }
-`,
-      "utf8",
-    );
-
-    const disposers = [];
-    const routes = [];
-
-    // 先订阅 SSE（使 sseClients 有成员）
-    // 外部收集 disposer
-    const ctx = {
-      logger: { warn: () => {} },
-      webServer: {
-        register(route) {
-          routes.push(route);
-          return () => {};
+describe("8) disposer 清理 warmup/prune 定时器（假时钟句柄计数）", () => {
+  it("apply 注册定时器 → disposer 后句柄计数归零", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const base = vi.getTimerCount();
+      const disposers = [];
+      const routes = [];
+      const ctx = {
+        logger: { warn: () => {} },
+        webServer: {
+          register(route) {
+            routes.push(route);
+            return () => {};
+          },
         },
-      },
-      on: onStub,
-      llm: {
-        listProviders() {
-          return [];
+        on: onStub,
+        llm: {
+          listProviders() {
+            return [];
+          },
         },
-      },
-      fiber: { state: "active" },
-      inject: (deps, cb) => {
-        cb({ settings: {} });
-      },
-      effect: (fn) => {
-        const d = fn();
-        if (typeof d === "function") disposers.push(d);
-        return d;
-      },
-    };
-    await apply(ctx, {
-      adapter: goodFile,
-      autoReload: true,
-      apiKey: "sk-test",
-      apiEndpoint: "http://127.0.0.1:9",
-    });
-
-    // 订阅 SSE（通过 events 路由 handler 添加 SSE 客户端）
-    evRoute = routes.find((r) => r.path === ROUTES.events);
-    let _sseRes;
-    evRoute?.handler(fakeReq({ method: "GET" }), {
-      writeHead: (_code, _headers) => {},
-      write: (_chunk) => {},
-      on: (evt, cb) => {
-        if (evt === "close") _sseRes = { close: cb };
-      },
-    });
-
-    // 执行所有 disposer（包括内层 ctx.effect 的 disposer）
-    for (const d of disposers) {
-      if (typeof d === "function") d();
+        fiber: { state: "active" },
+        inject: (deps, cb) => {
+          cb({ settings: {} });
+        },
+        effect: (fn) => {
+          const d = fn();
+          if (typeof d === "function") disposers.push(d);
+          return typeof d === "function" ? d : () => {};
+        },
+      };
+      // 隔离（#768 P1）：historyDir 指临时目录，否则回落真实 ~/.dsh
+      // （installUpgrade 写 .upgrade-version、TrendTracker 建 trend 目录）。
+      const dir = mkdtempSync(join(tmpdir(), "dou-apply-timers-"));
+      await apply(ctx, {
+        warmupIntervalMs: 60000,
+        apiKey: "sk-test",
+        apiEndpoint: "http://127.0.0.1:9",
+        historyDir: join(dir, "hist"),
+      });
+      // 非盲 guard：定时器确已注册——恰 3 个句柄（warmup 预热 + prune 清理 + scheduler
+      // tick，见 scheduler.ts:54），多一个少一个都先红而非归零断言空过。
+      expect(vi.getTimerCount()).toBe(base + 3);
+      // 必须 await：disposer 是异步链（await trend.dispose() 后才 scheduler.dispose()），
+      // 同步调用会让 scheduler 句柄看起来泄漏（实测 +1 残留即此因）。
+      for (const d of disposers) {
+        if (typeof d === "function") await d();
+      }
+      // 真断言：不清 clearInterval 即泄漏，此行红
+      expect(vi.getTimerCount()).toBe(base);
+    } finally {
+      vi.useRealTimers();
     }
-    disposed = true;
-  });
-
-  it("events 路由存在", () => {
-    expect(evRoute).toBeTruthy();
-  });
-
-  it("dispose 全分支不抛错", () => {
-    expect(disposed).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------- 8) 确保 warmupTimer 被清理（disposer 中）
-
-describe("8) 确保 warmupTimer 被清理（disposer 中）", () => {
-  let cleared;
-
-  beforeAll(async () => {
-    const disposers = [];
-    const routes = [];
-    const ctx = {
-      logger: { warn: () => {} },
-      webServer: {
-        register(route) {
-          routes.push(route);
-          return () => {};
-        },
-      },
-      on: onStub,
-      llm: {
-        listProviders() {
-          return [];
-        },
-      },
-      fiber: { state: "active" },
-      inject: (deps, cb) => {
-        cb({ settings: {} });
-      },
-      effect: (fn) => {
-        const d = fn();
-        if (typeof d === "function") disposers.push(d);
-        return typeof d === "function" ? d : () => {};
-      },
-    };
-    await apply(ctx, {
-      warmupIntervalMs: 60000,
-      apiKey: "sk-test",
-      apiEndpoint: "http://127.0.0.1:9",
-    });
-    for (const d of disposers) {
-      if (typeof d === "function") d();
-    }
-    cleared = true;
-  });
-
-  it("warmupTimer 清理不抛错", () => {
-    expect(cleared).toBe(true);
   });
 });
 
@@ -1071,10 +930,16 @@ describe.skipIf(process.platform === "win32")(
   },
 );
 
-// ---------------------------------------------------------------- stats/history 路由围栏与数据面
+// ---------------------------------------------------------------- history 数据面（围栏经 integration+smoke 覆盖）
+//
+// 围栏删测登记（M1）：删围栏四例——stats 路由已注册弱断言、stats 非 loopback 403、
+// stats POST 405、history 非 loopback 403。覆盖去向：src 门面层由
+// integration/data-routes D10二（403 先于 405 顺序敏感 + 文案逐字节锁定）保留；
+// lib 产物层由 smoke 围栏全矩阵（十六路由 403/405 + 文案）保留。保留 history
+// existence + 数据面五例（apply 装配经由，门面桩与产物矩阵未覆盖）。
 
-describe("stats/history 路由围栏与数据面", () => {
-  let stats, historyR, res403Code, res405Code, h403Code, noAdpBody, okBody;
+describe("history 数据面（围栏经 integration+smoke 覆盖）", () => {
+  let historyR, noAdpBody, okBody;
 
   beforeAll(async () => {
     const dir = mkdtempSync(join(tmpdir(), "dou-stats-"));
@@ -1089,20 +954,8 @@ describe("stats/history 路由围栏与数据面", () => {
       historyDir: join(dir, "hist"),
     });
 
-    // stats：403 非 loopback / 405 非 GET
-    stats = routeOf(routes, ROUTES.stats);
-    const res403 = makeRes();
-    await stats?.handler(fakeReq({ headers: { host: "evil.example" } }), res403);
-    res403Code = res403._code();
-    const res405 = makeRes();
-    await stats?.handler(fakeReq({ method: "POST" }), res405);
-    res405Code = res405._code();
-
-    // history：403 / 405 / 无候选 no-adapter / days clamp
+    // history 数据面：无候选 no-adapter / days clamp
     historyR = routeOf(routes, ROUTES.history);
-    const h403 = makeRes();
-    await historyR?.handler(fakeReq({ headers: { host: "x" } }), h403);
-    h403Code = h403._code();
 
     // 无启用适配器（清空选择后）→ 结构化 no-adapter
     const hNoAdp = makeRes();
@@ -1115,24 +968,8 @@ describe("stats/history 路由围栏与数据面", () => {
     okBody = JSON.parse(hDays._body());
   });
 
-  it("stats 路由已注册", () => {
-    expect(stats).toBeTruthy();
-  });
-
-  it("stats 非 loopback 403", () => {
-    expect(res403Code).toBe(403);
-  });
-
-  it("stats POST 405", () => {
-    expect(res405Code).toBe(405);
-  });
-
   it("history 路由已注册", () => {
     expect(historyR).toBeTruthy();
-  });
-
-  it("history 非 loopback 403", () => {
-    expect(h403Code).toBe(403);
   });
 
   it("无候选 provider 报 no-adapter", () => {
@@ -1355,7 +1192,7 @@ export function formatPanel() { return "<p>f</p>"; }
 
 // 注入窗口纪律：fetchWithTimeout 硬编码读取全局 fetch。经 injectGlobalFetch
 // 串行通道（#120）与其他模块的注入窗口互斥，save/restore 恒配对——ESM TLA
-// 交错下不再可能把他人 mock 固化为「现场」（unit-v1 慢路径 × 本窗口交错驻留实证）。
+// 交错下不再可能把他人 mock 固化为「现场」（unit-chart 慢路径 × 本窗口交错驻留实证）。
 describe("fetchWithTimeout 边界（#150 二阶段）", () => {
   let okStatus, fastCallsAtLeast1, okUrl, slowCallsAtLeast1, slowAborted, defCallsAtLeast1;
 

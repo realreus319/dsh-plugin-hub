@@ -42,26 +42,28 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// 白盒直连深路径（#768 B波）：日界纯面经 shared 门面，不走组合根转发。
+import { dayKey } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：历史存储经历史域门面，不走组合根转发。
+import { HistoryStore } from "../../../src/server/history/interface.ts";
+import { TrendTracker } from "../../../src/server/aggregate/interface.ts";
+import { TREND_ROW_VERSION, TREND_UNIDENTIFIED } from "../../../src/server/shared/interface.ts";
+import { normalizeConfig, DEFAULT_CONFIG } from "../../../src/shared/interface.ts";
+// 白盒直连深路径（#768 B波）：趋势聚合/采集纯面经域门面，不走组合根转发。
 import {
-  TrendCollector,
   TrendAggregator,
   TrendStore,
-  TrendTracker,
-  HistoryStore,
-  dayKey,
-  sumToken,
   mergeAggRows,
   mergeDirRows,
   mergeHourRows,
-  metricValue,
-  TREND_ROW_VERSION,
-  TREND_UNIDENTIFIED,
-  TREND_DONE_MAX,
+} from "../../../src/server/aggregate/interface.ts";
+import { TrendCollector, TREND_DONE_MAX } from "../../../src/server/collect/interface.ts";
+import {
   isValidShardRow,
   sanitizeDirName,
-  normalizeConfig,
-  DEFAULT_CONFIG,
-} from "../../../src/apply/index.ts";
+  sumToken,
+  metricValue,
+} from "../../../src/server/shared/interface.ts";
 
 // ---------------------------------------------------------------- 工具
 
@@ -1675,7 +1677,12 @@ describe("tracker：启动重建（聚合分片权威）", () => {
       join(detDir, `${day1}.jsonl`),
       `${JSON.stringify({ v: 1, kind: "detail", time: T0, day: day1, session: "sx", turn: 1, step: 1, retry: 1, provider: "p", model: "m", input: 999, output: 999, cacheRead: null, cacheWrite: null, calls: 1 })}\n`,
     );
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 50 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 50,
+    });
     const b = tracker.buckets().find((d) => d.day === day1);
     cellCalls = b.providers[0].cell.calls;
     cellInput = b.providers[0].cell.input;
@@ -1742,7 +1749,12 @@ describe("tracker：自愈压实（过去日明细无聚合分片）", () => {
         "", // 尾空行容忍
       ].join("\n"),
     );
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 50 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 50,
+    });
     const b = tracker.buckets().find((d) => d.day === day1);
     cellCalls = b.providers[0].cell.calls;
     aggWritten = existsSync(join(aggDir, `${day1}.jsonl`));
@@ -1792,7 +1804,12 @@ describe("tracker：当日明细重建 + 新事件 flush（既有行不二次落
       calls: 1,
     };
     writeFileSync(join(detDir, `${today}.jsonl`), `${JSON.stringify(preRow)}\n`);
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 50 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 50,
+    });
     tracker.handleEvent(
       { id: "s1" },
       ev(
@@ -1847,7 +1864,12 @@ describe("tracker：防抖刷盘 + dispose await 刷盘", () => {
   beforeAll(async () => {
     const root = mkdtempSync(join(tmpdir(), "dou-trend-flush-"));
     const today = dayKey(T0);
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 30 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 30,
+    });
     tracker.handleEvent(
       { id: "s1" },
       ev(
@@ -1893,7 +1915,12 @@ describe("tracker：日切压实与重启不双算（含迟到旧日行合并）
     // 日切压实：跨天后旧日压实为聚合分片、明细分片删除、重启不双算
     const root = mkdtempSync(join(tmpdir(), "dou-trend-rollup-"));
     let nowMs = T0; // 09-04
-    let tracker = await TrendTracker.start({ root, now: () => nowMs, flushDebounceMs: 50 });
+    let tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => nowMs,
+      flushDebounceMs: 50,
+    });
     tracker.handleEvent({ id: "s1" }, ev("request/header", HEADER(), T0, 1));
     tracker.handleEvent({ id: "s1" }, ev("assistant/chunk", USAGE(100, 50), T0, 2));
     tracker.handleEvent(
@@ -1940,7 +1967,12 @@ describe("tracker：日切压实与重启不双算（含迟到旧日行合并）
     // 重启重建：聚合权威载入，cells 与重启前一致
     const beforeBuckets = JSON.stringify(tracker.buckets());
     await tracker.dispose();
-    tracker = await TrendTracker.start({ root, now: () => nowMs, flushDebounceMs: 50 });
+    tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => nowMs,
+      flushDebounceMs: 50,
+    });
     const afterCells = tracker.buckets().find((d) => d.day === day0).providers[0].cell;
     restartCalls = afterCells.calls;
     restartInput = afterCells.input;
@@ -1996,7 +2028,12 @@ describe("tracker：dispose await 最终刷盘", () => {
   beforeAll(async () => {
     // dispose await 最终刷盘：事件后立即 dispose，分片必落盘
     const root = mkdtempSync(join(tmpdir(), "dou-trend-dispose-"));
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 60000 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 60000,
+    });
     tracker.handleEvent(
       { id: "s1" },
       ev(
@@ -2021,7 +2058,12 @@ describe("tracker：flushNow 语义与 handleDisposed 清理", () => {
   beforeAll(async () => {
     // session/flush 语义在 tracker 层等价 flushNow；handleDisposed 清理不崩
     const root = mkdtempSync(join(tmpdir(), "dou-trend-flushpt-"));
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 60000 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 60000,
+    });
     tracker.handleEvent(
       { id: "s1" },
       ev(
@@ -2217,7 +2259,12 @@ describe("评审修复 P1-3（tracker 级）：flush 部分失败不重复 appen
     // 失败日行待下轮补上（时钟回拨过去日 + 分片目录障碍构造 EISDIR）。
     const root = mkdtempSync(join(tmpdir(), "dou-trend-partial2-"));
     const nowMs = T0; // 09-04 today
-    const tracker = await TrendTracker.start({ root, now: () => nowMs, flushDebounceMs: 60000 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => nowMs,
+      flushDebounceMs: 60000,
+    });
     const H = { header: { config: { provider: "p", model: "m" } }, reason: "initial" };
     const today = dayKey(T0);
     const pastDay = dayKey(T0 - 24 * HOUR); // 09-03
@@ -2637,6 +2684,7 @@ describe("评审修复 P2-6：tracker 侧 onAnomaly 接线到 warn", () => {
     const warns = [];
     const root = mkdtempSync(join(tmpdir(), "dou-trend-anomaly-"));
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -2777,6 +2825,7 @@ describe("#633 A1(a)：per-session 惰性单查（resolveCwd 恰 1 次）", () =
     const root = mkdtempSync(join(tmpdir(), "dou-trend-dir-once-"));
     const cwdCalls0 = [];
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -2833,6 +2882,7 @@ describe("#633 A1(b)：resolveCwd 缺失/抛错归未识别桶且各查 1 次", 
     const root = mkdtempSync(join(tmpdir(), "dou-trend-dir-miss-"));
     const counts = { s1: 0, s2: 0 };
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -2900,6 +2950,7 @@ describe("#633 A1(c)：cwd 经 sanitizeDirName 净化后落盘 + 纯函数面直
     const root = mkdtempSync(join(tmpdir(), "dou-trend-dir-sanitize-"));
     let flip = 0;
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -2983,6 +3034,7 @@ describe("#633 A1(d)：落盘 detail/counter 行均含 dir 字段且多 session 
     // A1(d)：落盘 detail/counter 行均含 dir 字段且值正确（多 session 各自归属不串桶）
     const root = mkdtempSync(join(tmpdir(), "dou-trend-dir-persist-"));
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -3126,6 +3178,7 @@ describe("#633 A2(a)：旧格式 fixture 重建（聚合权威 + 当日明细不
 
     const warns0 = [];
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -3240,6 +3293,7 @@ describe("#633 A2(b)：自愈压实路径（旧格式明细无聚合分片）", 
     );
     const warns0 = [];
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -3369,7 +3423,12 @@ describe("#633 A2(c)：round-trip（旧格式行 rebuild → flushNow → 重读
     };
     const originalBytes = `${JSON.stringify(legacyTodayDetail)}\n${JSON.stringify(legacyTodayCounter)}\n${JSON.stringify(legacyTodayDetail2)}\n`;
     writeFileSync(detFile, originalBytes);
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 60000 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 60000,
+    });
     const cell = tracker.buckets().find((d) => d.day === dayKey(T0)).providers[0].cell;
     cellCalls = cell.calls;
     cellTurns = cell.turns;
@@ -3481,6 +3540,7 @@ describe("#633 A2(d)：未知键容忍（legacyFlag 不拒绝、不告警）", (
     );
     const warns0 = [];
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -3562,6 +3622,7 @@ describe("#633 A3(a)：内存态归并（tracker 全链路压实产物）", () =
     const root = mkdtempSync(join(tmpdir(), "dou-trend-a3-merge-"));
     let nowMs = T0;
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -4003,6 +4064,7 @@ describe("#633 A4(e)：混存 round-trip（压实→重启→迟到行二次压�
     const root = mkdtempSync(join(tmpdir(), "dou-trend-a4-roundtrip-"));
     let nowMs = T0;
     let tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -4029,6 +4091,7 @@ describe("#633 A4(e)：混存 round-trip（压实→重启→迟到行二次压�
     detailShardDeleted = existsSync(join(root, "details", `${DAY0}.jsonl`));
     await tracker.dispose();
     tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -4072,6 +4135,7 @@ describe("#633 A4(e)：混存 round-trip（压实→重启→迟到行二次压�
     round2Dirs = snapshot(round2.filter((r) => r.kind === "dir"));
     await tracker.dispose();
     tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -4202,6 +4266,7 @@ describe("#633 A4(e)：混存 round-trip（压实→重启→迟到行二次压�
 describe("#633 A4(f)：查询面零变化（dir 记账/rebuild 不影响 buckets/seriesDays）", () => {
   let buckets;
   let seriesValues;
+  let dirSnapshot;
 
   beforeAll(() => {
     // A4(f)：查询面零变化——含 dir 记账 + dir 行 rebuild 后，buckets()/seriesDays()
@@ -4268,6 +4333,9 @@ describe("#633 A4(f)：查询面零变化（dir 记账/rebuild 不影响 buckets
     );
     buckets = snapshot(agg.buckets());
     seriesValues = snapshot(agg.seriesDays(2, T0 + HOUR, "input").map((d) => d.value));
+    // A4(f)补dir：dir 面正向断言——dir 行 rebuild 进 dirDays（与 apply 平行累加合并），
+    // 无 dir 事实的行经残差投影归未识别桶（与 buckets/seriesDays 零变化断言同源）。
+    dirSnapshot = snapshot(agg.dirRows());
   });
 
   it("buckets() 固定 fixture 全等（dir 行 rebuild 不进 cells、apply 平行累加不污染）", () => {
@@ -4309,6 +4377,37 @@ describe("#633 A4(f)：查询面零变化（dir 记账/rebuild 不影响 buckets
   it("seriesDays 零变化（空日 null 语义保持；input=4+5 跨 provider 求和）", () => {
     expect(seriesValues).toEqual([null, 9]);
   });
+
+  it("dir 面正向：x 行合并（calls=2/input=2+2），无 dir 行归未识别桶（input=7）", () => {
+    expect(dirSnapshot).toEqual([
+      {
+        v: TREND_ROW_VERSION,
+        kind: "dir",
+        day: DAY0,
+        dir: "x",
+        input: 2,
+        output: 4,
+        cacheRead: 0,
+        cacheWrite: 0,
+        calls: 2,
+        turns: 0,
+        toolCalls: 0,
+      },
+      {
+        v: TREND_ROW_VERSION,
+        kind: "dir",
+        day: DAY0,
+        dir: TREND_UNIDENTIFIED,
+        input: 7,
+        output: 7,
+        cacheRead: null,
+        cacheWrite: null,
+        calls: 1,
+        turns: 1,
+        toolCalls: 1,
+      },
+    ]);
+  });
 });
 
 describe("#633 A4(g)：量级留痕（1000 事件 / 5 session）", () => {
@@ -4324,6 +4423,7 @@ describe("#633 A4(g)：量级留痕（1000 事件 / 5 session）", () => {
     let cwdCalls0 = 0;
     const startAt = Date.now();
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,
@@ -4412,6 +4512,7 @@ describe("复核 M1(a)：混存分片重启重建后 dirDays 恢复（dir 行真
     const root = mkdtempSync(join(tmpdir(), "dou-trend-m1-rebuild-"));
     let nowMs = T0;
     let tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -4433,6 +4534,7 @@ describe("复核 M1(a)：混存分片重启重建后 dirDays 恢复（dir 行真
     await tracker.flushNow(); // 压实：agg+dir 混存落盘、明细分片删除
     await tracker.dispose();
     tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -4555,7 +4657,12 @@ describe("复核 M1(b)：自愈压实 dir 行 + pruneDays 联动删除 dirDays",
         "",
       ].join("\n"),
     );
-    const tracker = await TrendTracker.start({ root, now: () => T0, flushDebounceMs: 60000 });
+    const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
+      root,
+      now: () => T0,
+      flushDebounceMs: 60000,
+    });
     healedDirRows = snapshot(
       (await new TrendStore({ root }).readAggDayShard(day1)).filter((r) => r.kind === "dir"),
     );
@@ -5209,6 +5316,7 @@ describe("复核 P1-1(a)：常驻运行期跨天（压实后 Day0 目录面保�
     const root = mkdtempSync(join(tmpdir(), "dou-trend-p11-crossday-"));
     let nowMs = T0;
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -5290,6 +5398,7 @@ describe("复核 P1-1(b)：重启恢复后同日继续 apply（dirRows 当日 = 
     const root = mkdtempSync(join(tmpdir(), "dou-trend-p11-sameday-"));
     const nowMs = T0; // 当日（detail 分片 day === today，不走自愈压实）
     let tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -5300,6 +5409,7 @@ describe("复核 P1-1(b)：重启恢复后同日继续 apply（dirRows 当日 = 
     await tracker.flushNow(); // 当日明细落盘（persisted=true，pending 保留）
     await tracker.dispose();
     tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -5495,6 +5605,7 @@ describe("#654 集成级：压实 await 窗口内到达的过去日行不被连�
     const nowMs = T0; // 当日 09-04，迟到行落 09-03（时钟回拨形态）
     const pastDay = dayKey(T0 - 24 * HOUR);
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -5587,6 +5698,7 @@ describe("#654 同域：deleteDetailShard 失败不得导致下一轮磁盘双�
     const nowMs = T0;
     const pastDay = dayKey(T0 - 24 * HOUR);
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => nowMs,
       flushDebounceMs: 60000,
@@ -5736,23 +5848,14 @@ describe("sumToken null 语义", () => {
 // 修法：目录面 = dirDays 快照 + 每日残差（聚合面 − 目录面），残差归未识别桶；
 // **禁止**在 rebuild 里对 agg 行补造（同一事实的 agg/dir 两个投影会双算）。
 
-/** (e) 双面总量守恒的 fixture 集（收集期静态量，供 it.each 展开）。 */
-const CONSERVATION_FIXTURES = ["a", "b", "c"];
-
-describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
-  let aDirs;
-  let bRowsLength;
-  let bDir;
-  let bValues;
+// H9：纯函数面 a/b/e/i 已删（见各处登记），本 describe 仅留 c/d/f/g/h/j 变体。
+describe("#633 修复：目录面残差投影（纯函数面 c/d/f/g/h/j）", () => {
   let cDirsSorted;
   let dDirs;
-  let conservation;
   let fRowsLength;
   let fRowValues;
   let gDirs;
   let hDays;
-  let iBeforeLength;
-  let iAfterDays;
   let jInputBefore;
   let jInputAfter;
 
@@ -5771,55 +5874,9 @@ describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
       dir,
       tokens: { input, output, cacheRead: null, cacheWrite: null },
     });
-    const counter = (dir) => ({
-      time: T0 - 24 * HOUR,
-      session: "s1",
-      provider: "deepseek",
-      model: "deepseek-chat",
-      dir,
-      turns: 1,
-      toolCalls: 1,
-    });
 
-    // (a) 目录面已覆盖全量（apply 平行累加）→ 残差 0 → 不补造未识别行
-    const a = mkAgg();
-    a.apply({ type: "call", record: call("alpha", 100, 20) });
-    a.apply({ type: "counter", record: counter("alpha") });
-    aDirs = snapshot(a.dirRows().map((r) => r.dir));
-
-    // (b) 只有聚合面事实（旧格式 agg 行重建）→ 残差 = 全量 → 补造一条未识别行
-    const b = mkAgg();
-    b.rebuild(
-      [
-        {
-          v: TREND_ROW_VERSION,
-          kind: "agg",
-          day,
-          provider: "deepseek",
-          model: "deepseek-chat",
-          input: 5000,
-          output: 800,
-          cacheRead: 120,
-          cacheWrite: 10,
-          calls: 30,
-          turns: 12,
-          toolCalls: 40,
-        },
-      ],
-      false,
-    );
-    const bRows = b.dirRows();
-    bRowsLength = bRows.length;
-    bDir = bRows[0].dir;
-    bValues = snapshot({
-      input: bRows[0].input,
-      output: bRows[0].output,
-      cacheRead: bRows[0].cacheRead,
-      cacheWrite: bRows[0].cacheWrite,
-      calls: bRows[0].calls,
-      turns: bRows[0].turns,
-      toolCalls: bRows[0].toolCalls,
-    });
+    // (b) 已删（H9）：旧格式 agg-only 残差形状由本文件末段真实升级 e2e 钉住
+    // （1 行/历史日/未识别/calls/分片不变/面板值）；7 字段逐值精度随删已登记。
 
     // (c) 混版日（旧 agg 行 + 新 dir 行并存）→ 残差 = 旧 agg 部分，新 dir 行照常分目录
     const c = mkAgg();
@@ -5884,38 +5941,7 @@ describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
     );
     dDirs = snapshot(d.dirRows().map((r) => r.dir));
 
-    // (e) 双面总量守恒（本修复的核心不变量）：∀day 目录面合计 == 聚合面合计
-    const totalsOf = (agg) => {
-      const byDay = new Map();
-      for (const r of agg.dirRows()) {
-        const cur = byDay.get(r.day) ?? { input: 0, calls: 0, turns: 0, toolCalls: 0 };
-        cur.input += r.input ?? 0;
-        cur.calls += r.calls;
-        cur.turns += r.turns;
-        cur.toolCalls += r.toolCalls;
-        byDay.set(r.day, cur);
-      }
-      const out = {};
-      for (const bucket of agg.buckets()) {
-        let pInput = 0;
-        let pCalls = 0;
-        let pTurns = 0;
-        let pTool = 0;
-        for (const p of bucket.providers) {
-          pInput += p.cell.input ?? 0;
-          pCalls += p.cell.calls;
-          pTurns += p.cell.turns;
-          pTool += p.cell.toolCalls;
-        }
-        const dir = byDay.get(bucket.day) ?? { input: 0, calls: 0, turns: 0, toolCalls: 0 };
-        out[bucket.day] = {
-          dir: { input: dir.input, calls: dir.calls, turns: dir.turns, toolCalls: dir.toolCalls },
-          agg: { input: pInput, calls: pCalls, turns: pTurns, toolCalls: pTool },
-        };
-      }
-      return out;
-    };
-    conservation = { a: totalsOf(a), b: totalsOf(b), c: totalsOf(c) };
+    // (e) 已删（H9）：双面总量守恒恒等由 ledger 台账守恒对账更强钉住（四视角逐日逐字段）。
 
     // (f) 同键唯一：该日 dirDays 已有 (unidentified) 桶 + 残差 > 0（混版日）→ 合并为一行
     const f = mkAgg();
@@ -6007,44 +6033,7 @@ describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
     });
     hDays = snapshot(h.dirRows().map((r) => r.day));
 
-    // (i) prune 后：被裁日的残差行同步消失（dirRows 不残留已裁剪日）
-    const i = mkAgg();
-    i.rebuild(
-      [
-        {
-          v: TREND_ROW_VERSION,
-          kind: "agg",
-          day: "2026-09-01",
-          provider: "deepseek",
-          model: "m",
-          input: 1,
-          output: 0,
-          cacheRead: null,
-          cacheWrite: null,
-          calls: 1,
-          turns: 0,
-          toolCalls: 0,
-        },
-        {
-          v: TREND_ROW_VERSION,
-          kind: "agg",
-          day: "2026-09-03",
-          provider: "deepseek",
-          model: "m",
-          input: 2,
-          output: 0,
-          cacheRead: null,
-          cacheWrite: null,
-          calls: 2,
-          turns: 0,
-          toolCalls: 0,
-        },
-      ],
-      false,
-    );
-    iBeforeLength = i.dirRows().length;
-    i.pruneDays("2026-09-03");
-    iAfterDays = snapshot(i.dirRows().map((r) => r.day));
+    // (i) 已删（H9）：prune 联动删除残差行由 M1(b) 单元面 pruneDays 联动钉住（同生命周期）。
 
     // (j) 校正后：旧格式（无 dir 键）明细行 correct → 残差吸收增量（dirRows 随之变化）
     const j = mkAgg();
@@ -6084,30 +6073,8 @@ describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
     jInputAfter = j.dirRows()[0].input;
   });
 
-  it("残差为 0（目录面已含全量）→ 不补造未识别桶（不双算）", () => {
-    expect(aDirs).toEqual(["alpha"]);
-  });
-
-  it("旧格式 agg-only 日 → 恰补造一条残差行（历史不再消失）", () => {
-    expect(bRowsLength).toBe(1);
-  });
-
-  it("残差行归未识别桶（该日无目录信息）", () => {
-    expect(bDir).toBe(TREND_UNIDENTIFIED);
-  });
-
-  it("残差数值 = 聚合面全量（逐字段）", () => {
-    expect(bValues).toEqual({
-      input: 5000,
-      output: 800,
-      cacheRead: 120,
-      cacheWrite: 10,
-      calls: 30,
-      turns: 12,
-      toolCalls: 40,
-    });
-  });
-
+  // H9 已删（a/b）：残差 0 不补造由 ledger 守恒对账隐含（多造一行即总量失衡）；
+  // 旧 agg-only 三条由末段真实升级 e2e 钉住。混版（c）独无他处 pin，保留：
   it("混版日：残差 = agg − dir（归未识别），新 dir 行照常分目录，两者不重叠", () => {
     expect(cDirsSorted).toEqual([
       ["(unidentified)", 3000, 20],
@@ -6119,18 +6086,8 @@ describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
     expect(dDirs).toEqual(["alpha"]);
   });
 
-  // 原嵌套 for (const agg of [a, b, c]) × for (const bucket of agg.buckets()) 断言展开为
-  // it.each(CONSERVATION_FIXTURES)：三例各只有一个 2026-09-03 日桶，故每例恰一条守恒断言。
-  it.each(CONSERVATION_FIXTURES)(
-    "日总量守恒（2026-09-03）：目录面 == 聚合面 [fixture %s]",
-    (key) => {
-      const byDay = conservation[key];
-      for (const [bucketDay, t] of Object.entries(byDay)) {
-        expect(t.dir, `日总量守恒（${bucketDay}）：目录面 == 聚合面`).toEqual(t.agg);
-      }
-    },
-  );
-
+  // H9 已删（e）：日总量守恒恒等由 ledger 台账守恒对账更强钉住（四视角逐日逐字段）。
+  // 同键合并（f）独无他处 pin（A4(d) 只并 dir 行，不并残差入既有未识别桶），保留：
   it("同 (day, dir) 键唯一（残差并入既有未识别桶，不另起一行）", () => {
     expect(fRowsLength).toBe(1);
   });
@@ -6147,14 +6104,8 @@ describe("#633 修复：目录面残差投影（纯函数面 a-j）", () => {
     expect(hDays).toEqual(["2026-09-06", "2026-09-07", "2026-09-08"]);
   });
 
-  it("prune 前两日残差行都在", () => {
-    expect(iBeforeLength).toBe(2);
-  });
-
-  it("prune 后被裁日的残差行同步消失（无残留）", () => {
-    expect(iAfterDays).toEqual(["2026-09-03"]);
-  });
-
+  // H9 已删（i）：prune 联动删除残差行由 M1(b) 单元面 pruneDays 联动钉住（同生命周期）。
+  // 无 dir 键（j）是 A2“旧格式无 dir 行由残差投影承担”边界的纯函数镜像，无他处 pin，保留：
   it("无 dir 键明细行 → 残差 = 10", () => {
     expect(jInputBefore).toBe(10);
   });
@@ -6179,6 +6130,7 @@ describe("#633 修复：真实升级场景端到端（旧 agg-only 分片重启�
     mkdirSync(join(root, "agg"), { recursive: true });
     writeFileSync(join(root, "agg", "2026-09-03.jsonl"), `${JSON.stringify(A2_LEGACY_AGG)}\n`);
     const tracker = await TrendTracker.start({
+      makeCollector: (o) => new TrendCollector(o),
       root,
       now: () => T0,
       flushDebounceMs: 60000,

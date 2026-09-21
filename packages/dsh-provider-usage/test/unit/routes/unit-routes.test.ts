@@ -1,17 +1,21 @@
 /**
  * dsh-provider-usage — unit：路由层纯函数（E5/C6 变异段前置，评审 P1-5）
  *
- * 抽离可测面：clampTrendN（trend 窗口封顶）、isReportPeriodValid/isReportKeyValid/
- * isTaskIdValid（报告路由双白名单校验）。薄 handler 的其余行为经 unit-report/
- * unit-apply/smoke 端到端覆盖。
+ * 抽离可测面：clampTrendN（trend 窗口封顶，#768 D12 起改址 server/ui-routes/trend.ts）、
+ * isReportPeriodValid/isReportKeyValid/isTaskIdValid（报告路由双白名单校验，
+ * #768 D11 起改址 server/report-routes）。
+ * 删测登记（M1）：删 SSE 薄 handler 四例（连通帧 + 注册、断连移除、重复断连安全、
+ * 非回环 403）——覆盖去向：src 门面层由 integration/ui-routes D12三围栏
+ * （403 先于 405）+ D12四 SSE 注册→断连→重连保留；lib 产物层由 smoke 围栏全矩阵
+ * （events 403/405）+ events 非可靠三例保留。
  */
 import { describe, expect, it } from "vitest";
-import { clampTrendN } from "../../../src/domain2/routes/ui.ts";
+import { clampTrendN } from "../../../src/server/ui-routes/trend.ts";
 import {
   isReportPeriodValid,
   isReportKeyValid,
   isTaskIdValid,
-} from "../../../src/domain2/routes/reports.ts";
+} from "../../../src/server/report-routes/reports.ts";
 
 describe("clampTrendN", () => {
   it("null → 默认 day=30", () => {
