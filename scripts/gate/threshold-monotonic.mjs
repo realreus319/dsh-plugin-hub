@@ -342,45 +342,65 @@ function resolveRenamePackagePair(pairs) {
  * 口径与 lib 的 compareExistenceGuard 同形。拆出降主函数复杂度，行为不变。
  * 函数计数按 9 口径：改名识别共 8 helpers + 主函数 = 9（本函数为其一，不再拆单守卫子函数）。
  */
-function checkRenameExistence(registry, newPkg, packages, exemptions, loadWorkspace) {
-  for (const guard of registry.guards ?? []) {
-    if (guard.kind !== "existence") continue;
-    if (!Array.isArray(guard.paths) || guard.paths.length === 0) continue;
-    const universe = guard.universe;
-    if (universe === null || typeof universe !== "object" || Array.isArray(universe)) continue;
-    const prefix = typeof universe.prefix === "string" ? universe.prefix : "";
-    if (!newPkg.startsWith(prefix)) continue;
-    const dirNeed = typeof universe.requireDir === "string" ? universe.requireDir : undefined;
-    const wsEntry = packages.find((pkg) => pkg.name === newPkg);
-    const governed =
-      wsEntry !== undefined &&
-      (dirNeed === undefined ||
-        dirNeed === "" ||
-        (Array.isArray(wsEntry.dirs) && wsEntry.dirs.includes(dirNeed)));
-    if (!governed) continue;
-    if (exemptions.has(guard.paths[0] + "." + newPkg + "#membership")) continue;
-    const anchorLedgerExempt = exemptions.has(guard.paths[0] + "." + newPkg + "#anchor");
-    let exempted = false;
-    const exemptFrom = guard.exemptFrom;
-    if (
-      isRecord(exemptFrom) &&
-      typeof exemptFrom.source === "string" &&
-      typeof exemptFrom.path === "string"
-    ) {
-      const exemptSide = loadWorkspace({ sources: [exemptFrom.source] });
-      if (exemptSide !== null) {
-        const exemptNode = resolveSingle(exemptSide.value, exemptFrom.path);
-        if (isRecord(exemptNode) && Object.hasOwn(exemptNode, newPkg)) exempted = true;
-      }
+function isExemptedSide(guard, newPkg, loadWorkspace) {
+  let exempted = false;
+  const exemptFrom = guard.exemptFrom;
+  if (
+    isRecord(exemptFrom) &&
+    typeof exemptFrom.source === "string" &&
+    typeof exemptFrom.path === "string"
+  ) {
+    const exemptSide = loadWorkspace({ sources: [exemptFrom.source] });
+    if (exemptSide !== null) {
+      const exemptNode = resolveSingle(exemptSide.value, exemptFrom.path);
+      if (isRecord(exemptNode) && Object.hasOwn(exemptNode, newPkg)) exempted = true;
     }
-    if (exempted) continue;
-    const wsTable = resolveSingle(loadWorkspace(guard)?.value, guard.paths[0]);
-    const newEntry = isRecord(wsTable) ? wsTable[newPkg] : undefined;
-    if (!isRecord(newEntry)) return false;
-    if (anchorLedgerExempt) continue;
-    const requireFields = Array.isArray(guard.requireFields) ? guard.requireFields : [];
-    const newAnchor = effectiveAnchor(newEntry, requireFields);
-    if (requireFields.length > 0 && (newAnchor === null || newAnchor.value <= 0)) return false;
+  }
+  return exempted;
+}
+function isRenameGovernanceSkipped(universe, newPkg, packages) {
+  const dirNeed = typeof universe.requireDir === "string" ? universe.requireDir : undefined;
+  const wsEntry = packages.find((pkg) => pkg.name === newPkg);
+  const governed =
+    wsEntry !== undefined &&
+    (dirNeed === undefined ||
+      dirNeed === "" ||
+      (Array.isArray(wsEntry.dirs) && wsEntry.dirs.includes(dirNeed)));
+  return !governed;
+}
+function isRenameScopeSkipped(guard, newPkg, packages) {
+  if (guard.kind !== "existence") return true;
+  if (!Array.isArray(guard.paths) || guard.paths.length === 0) return true;
+  const universe = guard.universe;
+  if (universe === null || typeof universe !== "object" || Array.isArray(universe)) return true;
+  const prefix = typeof universe.prefix === "string" ? universe.prefix : "";
+  if (!newPkg.startsWith(prefix)) return true;
+  return isRenameGovernanceSkipped(universe, newPkg, packages);
+}
+function renameExemptState(guard, newPkg, exemptions, loadWorkspace) {
+  if (exemptions.has(guard.paths[0] + "." + newPkg + "#membership")) return "skip";
+  if (isExemptedSide(guard, newPkg, loadWorkspace)) return "skip";
+  if (exemptions.has(guard.paths[0] + "." + newPkg + "#anchor")) return "anchor";
+  return "none";
+}
+function isRenameEntryFail(guard, newPkg, loadWorkspace, anchorExempt) {
+  const wsTable = resolveSingle(loadWorkspace(guard)?.value, guard.paths[0]);
+  const newEntry = isRecord(wsTable) ? wsTable[newPkg] : undefined;
+  if (!isRecord(newEntry)) return true;
+  if (anchorExempt) return false;
+  const requireFields = Array.isArray(guard.requireFields) ? guard.requireFields : [];
+  const newAnchor = effectiveAnchor(newEntry, requireFields);
+  return requireFields.length > 0 && (newAnchor === null || newAnchor.value <= 0);
+}
+function checkSingleRenameGuard(guard, newPkg, packages, exemptions, loadWorkspace) {
+  if (isRenameScopeSkipped(guard, newPkg, packages)) return true;
+  const exempt = renameExemptState(guard, newPkg, exemptions, loadWorkspace);
+  if (exempt === "skip") return true;
+  return !isRenameEntryFail(guard, newPkg, loadWorkspace, exempt === "anchor");
+}
+export function checkRenameExistence(registry, newPkg, packages, exemptions, loadWorkspace) {
+  for (const guard of registry.guards ?? []) {
+    if (!checkSingleRenameGuard(guard, newPkg, packages, exemptions, loadWorkspace)) return false;
   }
   return true;
 }

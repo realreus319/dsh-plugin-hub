@@ -152,6 +152,511 @@ export interface SettingsCardProps {
  * 改动只在点「保存」后生效：经 loopback HTTP 路由写入官方 settings 存储，
  * 宿主 scope.watch 立即重建转发器。
  */
+type CaConfirm = null | { kind: "generate" | "leaf" | "ca" };
+function BasicFields(props: {
+  settings: LanProxySettingsView;
+  patch: (p: Record<string, unknown>) => void;
+}): React.ReactElement {
+  const { settings, patch } = props;
+  return (
+    <React.Fragment>
+      {" "}
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-enabled">{t("enable")}</label>
+        <input
+          id="lp-set-enabled"
+          type="checkbox"
+          checked={settings.enabled}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ enabled: e.target.checked })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-port">{t("lanPort")}</label>
+        <input
+          id="lp-set-port"
+          className="lp-set-input"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={65535}
+          value={settings.port}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => patch({ port: e.target.value })}
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-https-enabled">{t("httpsCoexist")}</label>
+        <input
+          id="lp-set-https-enabled"
+          type="checkbox"
+          checked={settings.httpsEnabled}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ httpsEnabled: e.target.checked })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-https-port">{t("httpsPort")}</label>
+        <input
+          id="lp-set-https-port"
+          className="lp-set-input"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={65535}
+          value={settings.httpsPort}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ httpsPort: e.target.value })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-cert">{t("certFile")}</label>
+        <input
+          id="lp-set-cert"
+          className="lp-set-input"
+          type="text"
+          placeholder={t("certPlaceholder")}
+          value={settings.tlsCertFile}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ tlsCertFile: e.target.value })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-key">{t("keyFile")}</label>
+        <input
+          id="lp-set-key"
+          className="lp-set-input"
+          type="text"
+          placeholder={t("keyPlaceholder")}
+          value={settings.tlsKeyFile}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ tlsKeyFile: e.target.value })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-ca">{t("caCertFile")}</label>
+        <input
+          id="lp-set-ca"
+          className="lp-set-input"
+          type="text"
+          placeholder={t("caCertPlaceholder")}
+          value={settings.tlsCaCertFile}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ tlsCaCertFile: e.target.value })
+          }
+        />
+      </div>
+    </React.Fragment>
+  );
+}
+const CA_MODE_KEY: Record<string, string> = {
+  "self-signed": "caModeSelfSigned",
+  managed: "caModeManaged",
+  custom: "caModeCustom",
+  error: "caConfigError",
+};
+type CaAction =
+  | { type: "confirm"; kind: "generate" | "leaf" | "ca" }
+  | { type: "cancel" }
+  | { type: "submit"; kind: "generate" | "leaf" | "ca"; confirmed: boolean }
+  | { type: "clear" };
+function caDispatch(
+  setCaConfirm: React.Dispatch<React.SetStateAction<CaConfirm>>,
+  runCaAction: (kind: "generate" | "leaf" | "ca", confirmed: boolean) => void,
+  clearTriple: () => void,
+  action: CaAction,
+): void {
+  if (action.type === "confirm") {
+    setCaConfirm({ kind: action.kind });
+    return;
+  }
+  if (action.type === "cancel") {
+    setCaConfirm(null);
+    return;
+  }
+  if (action.type === "clear") {
+    clearTriple();
+    return;
+  }
+  runCaAction(action.kind, action.confirmed);
+}
+function getCaStateView(hostFacts: Record<string, unknown> | null, caConfirm: CaConfirm) {
+  const caState = typeof hostFacts?.caState === "string" ? hostFacts.caState : undefined;
+  const caModeKey: string | null = caState !== undefined ? (CA_MODE_KEY[caState] ?? null) : null;
+  let caConfirmLabel = "caGenerate";
+  if (caConfirm?.kind === "leaf") caConfirmLabel = "caRotate";
+  else if (caConfirm?.kind === "ca") caConfirmLabel = "caRotateCa";
+  return { state: caState, modeKey: caModeKey, confirmLabel: caConfirmLabel };
+}
+function asCertInfo(hostFacts: Record<string, unknown> | null): CertInfoView | null {
+  if (hostFacts?.certInfo === null || typeof hostFacts?.certInfo !== "object") return null;
+  return hostFacts.certInfo as CertInfoView;
+}
+function getCaWarnView(
+  hostFacts: Record<string, unknown> | null,
+  httpsEnabled: boolean,
+  caState: string | undefined,
+) {
+  const certInfo = asCertInfo(hostFacts);
+  const caWarnings = certInfo !== null ? evaluateCaWarnings(certInfo, Date.now()) : null;
+  const showCaWarnings = caWarnings !== null && caState === "managed" && httpsEnabled !== false;
+  const caCurrentIps =
+    certInfo !== null && Array.isArray(certInfo.currentIps)
+      ? certInfo.currentIps.filter((ip): ip is string => typeof ip === "string")
+      : [];
+  const caLeafDate =
+    certInfo !== null && typeof certInfo.leafValidTo === "string"
+      ? certInfo.leafValidTo.slice(0, 10)
+      : "";
+  return {
+    warnings: caWarnings,
+    showWarnings: showCaWarnings,
+    ips: caCurrentIps,
+    leafDate: caLeafDate,
+    customUnconfigured: hostFacts?.caConfigured !== true,
+  };
+}
+type CaView = {
+  state: string | undefined;
+  modeKey: string | null;
+  confirmLabel: string;
+  warnings: ReturnType<typeof evaluateCaWarnings> | null;
+  showWarnings: boolean;
+  ips: string[];
+  leafDate: string;
+  customUnconfigured: boolean;
+  caSaving: boolean;
+  caMsg: { msg: string; err: boolean } | null;
+  caConfirm: CaConfirm;
+  mainSaving: boolean;
+};
+function CaWarnHints(props: { view: CaView }): React.ReactElement | null {
+  const { view } = props;
+  if (!view.showWarnings) return null;
+  return (
+    <React.Fragment>
+      {view.warnings?.ipChanged ? (
+        <div className="lp-set-hint">{t("caIpChanged", { ips: view.ips.join(", ") })}</div>
+      ) : null}
+      {view.warnings?.expiring ? (
+        <div className="lp-set-hint">{t("caExpiring", { date: view.leafDate })}</div>
+      ) : null}
+    </React.Fragment>
+  );
+}
+function CaActions(props: {
+  view: CaView;
+  onAction: (action: CaAction) => void;
+}): React.ReactElement {
+  const { view, onAction } = props;
+  return (
+    <React.Fragment>
+      {view.state !== undefined ? (
+        <div className="lp-set-row" id="lp-ca-generate">
+          {view.state === "self-signed" ? (
+            <button
+              type="button"
+              className="lp-set-save"
+              onClick={() => onAction({ type: "submit", kind: "generate", confirmed: false })}
+              disabled={view.caSaving}
+            >
+              {t("caGenerate")}
+            </button>
+          ) : null}
+          {view.state === "managed" ? (
+            <button
+              type="button"
+              className="lp-set-save"
+              onClick={() => onAction({ type: "confirm", kind: "leaf" })}
+              disabled={view.caSaving}
+            >
+              {t("caRotate")}
+            </button>
+          ) : null}
+          {view.state === "managed" ? (
+            <button
+              type="button"
+              className="lp-set-save"
+              onClick={() => onAction({ type: "confirm", kind: "ca" })}
+              disabled={view.caSaving}
+            >
+              {t("caRotateCa")}
+            </button>
+          ) : null}
+          {view.state === "custom" || view.state === "error" ? (
+            <button
+              type="button"
+              className="lp-set-save"
+              disabled={true}
+              title={t(view.state === "error" ? "caFilesMissing" : "caDisabledNoCa")}
+            >
+              {t("caGenerate")}
+            </button>
+          ) : null}
+          {view.state === "error" ? (
+            <button
+              type="button"
+              className="lp-set-save"
+              onClick={() => onAction({ type: "clear" })}
+              disabled={view.mainSaving}
+            >
+              {t("caClearSelfSigned")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </React.Fragment>
+  );
+}
+function CaConfirmBox(props: {
+  view: CaView;
+  onAction: (action: CaAction) => void;
+}): React.ReactElement {
+  const { view, onAction } = props;
+  return (
+    <React.Fragment>
+      {view.caMsg ? (
+        <span className={view.caMsg.err ? "lp-set-error" : "lp-set-saved"}>{view.caMsg.msg}</span>
+      ) : null}
+      {view.caConfirm ? (
+        <div className="lp-set-row">
+          <span>{t("caConfirmTitle")}</span>
+          <span className="lp-set-hint">{t("caConfirmBody")}</span>
+          <button
+            type="button"
+            className="lp-set-save"
+            onClick={() =>
+              onAction({ type: "submit", kind: view.caConfirm!.kind, confirmed: true })
+            }
+            disabled={view.caSaving}
+          >
+            {t(view.confirmLabel)}
+          </button>
+          <button
+            type="button"
+            className="lp-set-save"
+            onClick={() => onAction({ type: "cancel" })}
+            disabled={view.caSaving}
+          >
+            {t("caConfirmCancel")}
+          </button>
+        </div>
+      ) : null}
+    </React.Fragment>
+  );
+}
+function CaHints(props: { view: CaView }): React.ReactElement {
+  const { view } = props;
+  return (
+    <React.Fragment>
+      <div className="lp-set-row">
+        <span>{t("caDownload")}</span>
+        <a className="lp-set-input" href={CA_CERT_ROUTE + "?format=cer"}>
+          {t("caDownloadLink")}
+        </a>
+      </div>
+      <div className="lp-set-hint">{t("caDownloadHint")}</div>
+      {view.modeKey ? (
+        <div className="lp-set-status" data-ca-state={view.state}>
+          {t(view.modeKey)}
+        </div>
+      ) : null}
+      {view.state === "self-signed" ? (
+        <div className="lp-set-hint">
+          {t("caDisabledNoCa")} <a href="#lp-ca-generate">{t("caGenerate")}</a>
+        </div>
+      ) : null}
+      {view.state === "custom" && view.customUnconfigured ? (
+        <div className="lp-set-hint">
+          {t("caDisabledNoCa")} <a href="#lp-ca-generate">{t("caGenerate")}</a>
+        </div>
+      ) : null}
+      {view.state === "error" ? (
+        <div className="lp-set-hint">
+          {t("caFilesMissing")} <a href="#lp-ca-generate">{t("caClearSelfSigned")}</a>
+        </div>
+      ) : null}
+      <CaWarnHints view={view} />
+    </React.Fragment>
+  );
+}
+function CaFields(props: {
+  view: CaView;
+  onAction: (action: CaAction) => void;
+}): React.ReactElement {
+  const { view, onAction } = props;
+  return (
+    <React.Fragment>
+      <CaHints view={view} />
+      <CaActions view={view} onAction={onAction} />
+      <CaConfirmBox view={view} onAction={onAction} />
+    </React.Fragment>
+  );
+}
+function ExtraFields(props: {
+  settings: LanProxySettingsView;
+  patch: (p: Record<string, unknown>) => void;
+}): React.ReactElement {
+  const { settings, patch } = props;
+  return (
+    <React.Fragment>
+      {" "}
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-banner">{t("printBanner")}</label>
+        <input
+          id="lp-set-banner"
+          type="checkbox"
+          checked={settings.printBanner}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ printBanner: e.target.checked })
+          }
+        />
+      </div>
+      {/* WS 桥接总开关（issue #552 解耦）：默认开——所有 WS 走「终结 + 桥接」
+              （保活基座：代答上游 Ping + 半开探活）。关闭 = 透传，移动端切后台
+              不再有保活兜底（README 标注断连风险）。与下方压缩开关正交。 */}
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-ws-bridge">{t("wsBridge")}</label>
+        <input
+          id="lp-set-ws-bridge"
+          type="checkbox"
+          checked={settings.wsBridgeEnabled !== false}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ wsBridgeEnabled: e.target.checked })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-ws-compress">{t("wsCompress")}</label>
+        <input
+          id="lp-set-ws-compress"
+          type="checkbox"
+          checked={settings.wsCompressEnabled}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ wsCompressEnabled: e.target.checked })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-ws-paths">{t("wsPaths")}</label>
+        <input
+          id="lp-set-ws-paths"
+          className="lp-set-input"
+          type="text"
+          placeholder="/api/remote.mux"
+          title={t("wsPathsHint")}
+          value={(settings.wsCompressPaths || []).join(", ")}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+            const parts = e.target.value
+              .split(",")
+              .map((s: string) => s.trim())
+              .filter(Boolean);
+            patch({ wsCompressPaths: parts });
+          }}
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-http-compress">{t("httpCompress")}</label>
+        <input
+          id="lp-set-http-compress"
+          type="checkbox"
+          checked={settings.httpCompressEnabled}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ httpCompressEnabled: e.target.checked })
+          }
+        />
+      </div>
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-level">{t("compressLevel")}</label>
+        <select
+          id="lp-set-level"
+          className="lp-set-input"
+          value={String(settings.httpCompressLevel)}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+            patch({ httpCompressLevel: Number(e.target.value) })
+          }
+        >
+          <option value="0">{t("level0")}</option>
+          <option value="1">{t("level1")}</option>
+          <option value="2">{t("level2")}</option>
+          <option value="3">{t("level3")}</option>
+        </select>
+      </div>
+      {/* injectToken（issue #380）：默认开启——LAN 设备免 token 直入；开启态
+              持久显示安全警示（评审要求：横幅一次性警示不足，卡片常驻提醒）。 */}
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-inject-token">{t("injectToken")}</label>
+        <input
+          id="lp-set-inject-token"
+          type="checkbox"
+          checked={settings.injectToken}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ injectToken: e.target.checked })
+          }
+        />
+      </div>
+      {settings.injectToken ? <div className="lp-set-warn">{t("injectTokenOnHint")}</div> : null}
+      {/* ownsHostCompat（issue #856）：默认关——向非回环页面声明 ownsHost 等同
+              伪造上游拓扑事实位；开启态常驻警示，底部另有三段判定结果。 */}
+      <div className="lp-set-row">
+        <label htmlFor="lp-set-owns-host-compat">{t("ownsHostCompat")}</label>
+        <input
+          id="lp-set-owns-host-compat"
+          type="checkbox"
+          checked={settings.ownsHostCompat === true}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            patch({ ownsHostCompat: e.target.checked })
+          }
+        />
+      </div>
+      {settings.ownsHostCompat === true ? (
+        <div className="lp-set-warn">{t("ownsHostCompatHint")}</div>
+      ) : null}
+    </React.Fragment>
+  );
+}
+function StatusFoot(props: {
+  compressLine: string | null;
+  hostTrustStatus: ReturnType<typeof evaluateHostTrust>;
+  hostFacts: Record<string, unknown> | null;
+  saved: { msg: string; err: boolean } | null;
+  saving: boolean;
+  save: () => void;
+}): React.ReactElement {
+  const { compressLine, hostTrustStatus, hostFacts, saved, saving, save } = props;
+  return (
+    <React.Fragment>
+      {" "}
+      <div className="lp-set-hint">{t("bodyHint")}</div>
+      {compressLine ? <div className="lp-set-status">{compressLine}</div> : null}
+      <div
+        className={hostTrustStatus === "contract-drift" ? "lp-set-warn" : "lp-set-status"}
+        data-host-trust={hostTrustStatus}
+      >
+        {t(HOST_TRUST_STATUS_KEY[hostTrustStatus])}
+      </div>
+      {hostFacts ? (
+        <div className="lp-set-status">
+          {t("hostTrustHostFacts", {
+            compat: hostFacts.ownsHostCompat === true ? t("hostTrustOn") : t("hostTrustOff"),
+          })}
+        </div>
+      ) : null}
+      <div className="lp-set-foot">
+        {saved ? (
+          <span className={saved.err ? "lp-set-error" : "lp-set-saved"}>{saved.msg}</span>
+        ) : null}
+        <button type="button" className="lp-set-save" onClick={() => save()} disabled={saving}>
+          {t("save")}
+        </button>
+      </div>
+    </React.Fragment>
+  );
+}
 export function SettingsCard(props: SettingsCardProps) {
   const DEFAULTS = props.defaults || CLIENT_DEFAULTS;
   const useState = React.useState;
@@ -432,31 +937,19 @@ export function SettingsCard(props: SettingsCardProps) {
   );
   // 一键 CA 展示态（issue #930 F7/F8/F9）：health.caState 唯一来源，客户端只渲染
   // 不判定；certInfo 缺席/不可读即无提醒（HTTP-only 无叶子同此）。
-  const caState = typeof hostFacts?.caState === "string" ? hostFacts.caState : undefined;
-  const certInfo =
-    hostFacts?.certInfo !== null && typeof hostFacts?.certInfo === "object"
-      ? (hostFacts.certInfo as CertInfoView)
-      : null;
-  let caModeKey: string | null = null;
-  if (caState === "self-signed") caModeKey = "caModeSelfSigned";
-  else if (caState === "managed") caModeKey = "caModeManaged";
-  else if (caState === "custom") caModeKey = "caModeCustom";
-  else if (caState === "error") caModeKey = "caConfigError";
-  const caWarnings = certInfo !== null ? evaluateCaWarnings(certInfo, Date.now()) : null;
-  const showCaWarnings =
-    caWarnings !== null && caState === "managed" && settingsValue.httpsEnabled !== false;
-  const caCurrentIps =
-    certInfo !== null && Array.isArray(certInfo.currentIps)
-      ? certInfo.currentIps.filter((ip): ip is string => typeof ip === "string")
-      : [];
-  const caLeafDate =
-    certInfo !== null && typeof certInfo.leafValidTo === "string"
-      ? certInfo.leafValidTo.slice(0, 10)
-      : "";
-  let caConfirmLabel = "caGenerate";
-  if (caConfirm?.kind === "leaf") caConfirmLabel = "caRotate";
-  else if (caConfirm?.kind === "ca") caConfirmLabel = "caRotateCa";
-
+  const statePart = getCaStateView(hostFacts, caConfirm);
+  const warnPart = getCaWarnView(hostFacts, settingsValue.httpsEnabled !== false, statePart.state);
+  const caView = {
+    ...statePart,
+    ...warnPart,
+    caSaving: caSaving,
+    caMsg: caMsg,
+    caConfirm: caConfirm,
+    mainSaving: saving,
+  };
+  const onCaAction = (action: CaAction): void => {
+    caDispatch(setCaConfirm, runCaAction, clearTripleToSelfSigned, action);
+  };
   return (
     <li className={"lp-set-card" + (open ? " lp-set-cardOpen" : "")}>
       <button
@@ -486,343 +979,17 @@ export function SettingsCard(props: SettingsCardProps) {
       </button>
       {open ? (
         <div className="lp-set-body">
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-enabled">{t("enable")}</label>
-            <input
-              id="lp-set-enabled"
-              type="checkbox"
-              checked={settings.enabled}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ enabled: e.target.checked })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-port">{t("lanPort")}</label>
-            <input
-              id="lp-set-port"
-              className="lp-set-input"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={65535}
-              value={settings.port}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => patch({ port: e.target.value })}
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-https-enabled">{t("httpsCoexist")}</label>
-            <input
-              id="lp-set-https-enabled"
-              type="checkbox"
-              checked={settings.httpsEnabled}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ httpsEnabled: e.target.checked })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-https-port">{t("httpsPort")}</label>
-            <input
-              id="lp-set-https-port"
-              className="lp-set-input"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={65535}
-              value={settings.httpsPort}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ httpsPort: e.target.value })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-cert">{t("certFile")}</label>
-            <input
-              id="lp-set-cert"
-              className="lp-set-input"
-              type="text"
-              placeholder={t("certPlaceholder")}
-              value={settings.tlsCertFile}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ tlsCertFile: e.target.value })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-key">{t("keyFile")}</label>
-            <input
-              id="lp-set-key"
-              className="lp-set-input"
-              type="text"
-              placeholder={t("keyPlaceholder")}
-              value={settings.tlsKeyFile}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ tlsKeyFile: e.target.value })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-ca">{t("caCertFile")}</label>
-            <input
-              id="lp-set-ca"
-              className="lp-set-input"
-              type="text"
-              placeholder={t("caCertPlaceholder")}
-              value={settings.tlsCaCertFile}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ tlsCaCertFile: e.target.value })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <span>{t("caDownload")}</span>
-            <a className="lp-set-input" href={CA_CERT_ROUTE + "?format=cer"}>
-              {t("caDownloadLink")}
-            </a>
-          </div>
-          <div className="lp-set-hint">{t("caDownloadHint")}</div>
-          {caModeKey ? (
-            <div className="lp-set-status" data-ca-state={caState}>
-              {t(caModeKey)}
-            </div>
-          ) : null}
-          {caState === "self-signed" ? (
-            <div className="lp-set-hint">
-              {t("caDisabledNoCa")} <a href="#lp-ca-generate">{t("caGenerate")}</a>
-            </div>
-          ) : null}
-          {caState === "custom" && hostFacts?.caConfigured !== true ? (
-            <div className="lp-set-hint">
-              {t("caDisabledNoCa")} <a href="#lp-ca-generate">{t("caGenerate")}</a>
-            </div>
-          ) : null}
-          {caState === "error" ? (
-            <div className="lp-set-hint">
-              {t("caFilesMissing")} <a href="#lp-ca-generate">{t("caClearSelfSigned")}</a>
-            </div>
-          ) : null}
-          {showCaWarnings && caWarnings?.ipChanged ? (
-            <div className="lp-set-hint">{t("caIpChanged", { ips: caCurrentIps.join(", ") })}</div>
-          ) : null}
-          {showCaWarnings && caWarnings?.expiring ? (
-            <div className="lp-set-hint">{t("caExpiring", { date: caLeafDate })}</div>
-          ) : null}
-          {caState !== undefined ? (
-            <div className="lp-set-row" id="lp-ca-generate">
-              {caState === "self-signed" ? (
-                <button
-                  type="button"
-                  className="lp-set-save"
-                  onClick={() => runCaAction("generate", false)}
-                  disabled={caSaving}
-                >
-                  {t("caGenerate")}
-                </button>
-              ) : null}
-              {caState === "managed" ? (
-                <button
-                  type="button"
-                  className="lp-set-save"
-                  onClick={() => setCaConfirm({ kind: "leaf" })}
-                  disabled={caSaving}
-                >
-                  {t("caRotate")}
-                </button>
-              ) : null}
-              {caState === "managed" ? (
-                <button
-                  type="button"
-                  className="lp-set-save"
-                  onClick={() => setCaConfirm({ kind: "ca" })}
-                  disabled={caSaving}
-                >
-                  {t("caRotateCa")}
-                </button>
-              ) : null}
-              {caState === "custom" || caState === "error" ? (
-                <button
-                  type="button"
-                  className="lp-set-save"
-                  disabled={true}
-                  title={t(caState === "error" ? "caFilesMissing" : "caDisabledNoCa")}
-                >
-                  {t("caGenerate")}
-                </button>
-              ) : null}
-              {caState === "error" ? (
-                <button
-                  type="button"
-                  className="lp-set-save"
-                  onClick={() => clearTripleToSelfSigned()}
-                  disabled={saving}
-                >
-                  {t("caClearSelfSigned")}
-                </button>
-              ) : null}
-              {caMsg ? (
-                <span className={caMsg.err ? "lp-set-error" : "lp-set-saved"}>{caMsg.msg}</span>
-              ) : null}
-            </div>
-          ) : null}
-          {caConfirm ? (
-            <div className="lp-set-row">
-              <span>{t("caConfirmTitle")}</span>
-              <span className="lp-set-hint">{t("caConfirmBody")}</span>
-              <button
-                type="button"
-                className="lp-set-save"
-                onClick={() => runCaAction(caConfirm.kind, true)}
-                disabled={caSaving}
-              >
-                {t(caConfirmLabel)}
-              </button>
-              <button
-                type="button"
-                className="lp-set-save"
-                onClick={() => setCaConfirm(null)}
-                disabled={caSaving}
-              >
-                {t("caConfirmCancel")}
-              </button>
-            </div>
-          ) : null}
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-banner">{t("printBanner")}</label>
-            <input
-              id="lp-set-banner"
-              type="checkbox"
-              checked={settings.printBanner}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ printBanner: e.target.checked })
-              }
-            />
-          </div>
-          {/* WS 桥接总开关（issue #552 解耦）：默认开——所有 WS 走「终结 + 桥接」
-              （保活基座：代答上游 Ping + 半开探活）。关闭 = 透传，移动端切后台
-              不再有保活兜底（README 标注断连风险）。与下方压缩开关正交。 */}
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-ws-bridge">{t("wsBridge")}</label>
-            <input
-              id="lp-set-ws-bridge"
-              type="checkbox"
-              checked={settings.wsBridgeEnabled !== false}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ wsBridgeEnabled: e.target.checked })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-ws-compress">{t("wsCompress")}</label>
-            <input
-              id="lp-set-ws-compress"
-              type="checkbox"
-              checked={settings.wsCompressEnabled}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ wsCompressEnabled: e.target.checked })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-ws-paths">{t("wsPaths")}</label>
-            <input
-              id="lp-set-ws-paths"
-              className="lp-set-input"
-              type="text"
-              placeholder="/api/remote.mux"
-              title={t("wsPathsHint")}
-              value={(settings.wsCompressPaths || []).join(", ")}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                const parts = e.target.value
-                  .split(",")
-                  .map((s: string) => s.trim())
-                  .filter(Boolean);
-                patch({ wsCompressPaths: parts });
-              }}
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-http-compress">{t("httpCompress")}</label>
-            <input
-              id="lp-set-http-compress"
-              type="checkbox"
-              checked={settings.httpCompressEnabled}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ httpCompressEnabled: e.target.checked })
-              }
-            />
-          </div>
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-level">{t("compressLevel")}</label>
-            <select
-              id="lp-set-level"
-              className="lp-set-input"
-              value={String(settings.httpCompressLevel)}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                patch({ httpCompressLevel: Number(e.target.value) })
-              }
-            >
-              <option value="0">{t("level0")}</option>
-              <option value="1">{t("level1")}</option>
-              <option value="2">{t("level2")}</option>
-              <option value="3">{t("level3")}</option>
-            </select>
-          </div>
-          {/* injectToken（issue #380）：默认开启——LAN 设备免 token 直入；开启态
-              持久显示安全警示（评审要求：横幅一次性警示不足，卡片常驻提醒）。 */}
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-inject-token">{t("injectToken")}</label>
-            <input
-              id="lp-set-inject-token"
-              type="checkbox"
-              checked={settings.injectToken}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ injectToken: e.target.checked })
-              }
-            />
-          </div>
-          {settings.injectToken ? (
-            <div className="lp-set-warn">{t("injectTokenOnHint")}</div>
-          ) : null}
-          {/* ownsHostCompat（issue #856）：默认关——向非回环页面声明 ownsHost 等同
-              伪造上游拓扑事实位；开启态常驻警示，底部另有三段判定结果。 */}
-          <div className="lp-set-row">
-            <label htmlFor="lp-set-owns-host-compat">{t("ownsHostCompat")}</label>
-            <input
-              id="lp-set-owns-host-compat"
-              type="checkbox"
-              checked={settings.ownsHostCompat === true}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                patch({ ownsHostCompat: e.target.checked })
-              }
-            />
-          </div>
-          {settings.ownsHostCompat === true ? (
-            <div className="lp-set-warn">{t("ownsHostCompatHint")}</div>
-          ) : null}
-          <div className="lp-set-hint">{t("bodyHint")}</div>
-          {compressLine ? <div className="lp-set-status">{compressLine}</div> : null}
-          <div
-            className={hostTrustStatus === "contract-drift" ? "lp-set-warn" : "lp-set-status"}
-            data-host-trust={hostTrustStatus}
-          >
-            {t(HOST_TRUST_STATUS_KEY[hostTrustStatus])}
-          </div>
-          {hostFacts ? (
-            <div className="lp-set-status">
-              {t("hostTrustHostFacts", {
-                compat: hostFacts.ownsHostCompat === true ? t("hostTrustOn") : t("hostTrustOff"),
-              })}
-            </div>
-          ) : null}
-          <div className="lp-set-foot">
-            {saved ? (
-              <span className={saved.err ? "lp-set-error" : "lp-set-saved"}>{saved.msg}</span>
-            ) : null}
-            <button type="button" className="lp-set-save" onClick={() => save()} disabled={saving}>
-              {t("save")}
-            </button>
-          </div>
+          <BasicFields settings={settingsValue} patch={patch} />
+          <CaFields view={caView} onAction={onCaAction} />
+          <ExtraFields settings={settingsValue} patch={patch} />
+          <StatusFoot
+            compressLine={compressLine}
+            hostTrustStatus={hostTrustStatus}
+            hostFacts={hostFacts}
+            saved={saved}
+            saving={saving}
+            save={save}
+          />
         </div>
       ) : null}
     </li>

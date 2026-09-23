@@ -238,61 +238,90 @@ export function findDirectConsumers(rootDir, pkg, supportFile) {
   directs.sort();
   return directs;
 }
+function resolveSegSet(topology, rootDir, faceCache, pkg, mutationConsumers, segKeys, fallback) {
+  const segSet = new Set();
+  for (const consumer of mutationConsumers) {
+    const entries = testFileEntries(topology, rootDir, faceCache, pkg, consumer);
+    if (entries.length === 1 && entries[0] === pkg) return fallback;
+    for (const e of entries) {
+      if (typeof e !== "string" || !e.startsWith(`${pkg}:`)) return fallback;
+      segSet.add(e);
+    }
+  }
+  if (segSet.size === 0) return fallback;
+  if (segKeys.every((k) => segSet.has(`${pkg}:${k}`))) return fallback;
+  return [...segSet].sort();
+}
+function supportSegKeys(topology, pkg) {
+  const segDefs = topology?.packages?.[pkg]?.segments;
+  if (segDefs === null || typeof segDefs !== "object" || Array.isArray(segDefs)) return null;
+  const keys = Object.keys(segDefs);
+  if (keys.length === 0) return null;
+  return keys;
+}
+function classifySupportConsumer(d, pkg, faceSet) {
+  if (isExemptTestFile(d, pkg)) return "exempt";
+  if (faceSet.has(d)) return "mutation";
+  if (!d.startsWith(`packages/${pkg}/test/`)) return "outside";
+  return "transit";
+}
+function visitSupportDirect(d, pkg, faceSet, visited, mutationConsumers, exemptConsumers, queue) {
+  if (visited.has(d)) return false;
+  visited.add(d);
+  const kind = classifySupportConsumer(d, pkg, faceSet);
+  if (kind === "exempt") exemptConsumers.add(d);
+  else if (kind === "mutation") mutationConsumers.add(d);
+  else if (kind === "outside") return true;
+  else queue.push(d);
+  return false;
+}
+function collectSupportConsumers(rootDir, pkg, file, faceSet) {
+  const visited = new Set([file]);
+  const queue = [file];
+  const mutationConsumers = new Set();
+  const exemptConsumers = new Set();
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    let directs;
+    try {
+      directs = findDirectConsumers(rootDir, pkg, cur);
+    } catch {
+      return { mutationConsumers, exemptConsumers, fallback: true };
+    }
+    if (directs.length === 0) {
+      if (cur === file) return { mutationConsumers, exemptConsumers, fallback: true };
+      continue;
+    }
+    for (const d of directs) {
+      if (visitSupportDirect(d, pkg, faceSet, visited, mutationConsumers, exemptConsumers, queue)) {
+        return { mutationConsumers, exemptConsumers, fallback: true };
+      }
+    }
+  }
+  return { mutationConsumers, exemptConsumers, fallback: false };
+}
+function supportFaceOf(packageFace, faceCache, pkg) {
+  if (Array.isArray(packageFace)) return packageFace;
+  return faceCache.get(pkg) ?? [];
+}
+function resolveSupportTail(collected, topology, rootDir, faceCache, pkg, segKeys) {
+  if (collected.fallback) return [pkg];
+  if (collected.mutationConsumers.size === 0) {
+    if (collected.exemptConsumers.size > 0) return [];
+    return [pkg];
+  }
+  return resolveSegSet(topology, rootDir, faceCache, pkg, collected.mutationConsumers, segKeys, [
+    pkg,
+  ]);
+}
 export function supportFileEntries(topology, rootDir, faceCache, pkg, file, packageFace) {
   try {
-    const pkgDef = topology?.packages?.[pkg];
-    const segDefs = pkgDef?.segments;
-    if (segDefs === null || typeof segDefs !== "object" || Array.isArray(segDefs)) return [pkg];
-    const segKeys = Object.keys(segDefs);
-    if (segKeys.length === 0) return [pkg];
-    const face = Array.isArray(packageFace) ? packageFace : (faceCache.get(pkg) ?? []);
+    const segKeys = supportSegKeys(topology, pkg);
+    if (segKeys === null) return [pkg];
+    const face = supportFaceOf(packageFace, faceCache, pkg);
     if (face.includes(file)) return testFileEntries(topology, rootDir, faceCache, pkg, file);
-    const faceSet = new Set(face);
-    const visited = new Set([file]);
-    const queue = [file];
-    const mutationConsumers = new Set();
-    const exemptConsumers = new Set();
-    while (queue.length > 0) {
-      const cur = queue.shift();
-      let directs;
-      try {
-        directs = findDirectConsumers(rootDir, pkg, cur);
-      } catch {
-        return [pkg];
-      }
-      if (directs.length === 0) {
-        if (cur === file) return [pkg];
-        continue;
-      }
-      for (const d of directs) {
-        if (visited.has(d)) continue;
-        visited.add(d);
-        if (isExemptTestFile(d, pkg)) {
-          exemptConsumers.add(d);
-        } else if (faceSet.has(d)) {
-          mutationConsumers.add(d);
-        } else {
-          if (!d.startsWith(`packages/${pkg}/test/`)) return [pkg];
-          queue.push(d);
-        }
-      }
-    }
-    if (mutationConsumers.size === 0) {
-      if (exemptConsumers.size > 0) return [];
-      return [pkg];
-    }
-    const segSet = new Set();
-    for (const consumer of mutationConsumers) {
-      const entries = testFileEntries(topology, rootDir, faceCache, pkg, consumer);
-      if (entries.length === 1 && entries[0] === pkg) return [pkg];
-      for (const e of entries) {
-        if (typeof e !== "string" || !e.startsWith(`${pkg}:`)) return [pkg];
-        segSet.add(e);
-      }
-    }
-    if (segSet.size === 0) return [pkg];
-    if (segKeys.every((k) => segSet.has(`${pkg}:${k}`))) return [pkg];
-    return [...segSet].sort();
+    const collected = collectSupportConsumers(rootDir, pkg, file, new Set(face));
+    return resolveSupportTail(collected, topology, rootDir, faceCache, pkg, segKeys);
   } catch {
     return [pkg];
   }

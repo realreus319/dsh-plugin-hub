@@ -391,27 +391,30 @@ export const zaiCodingCnAdapter = {
 
     const cards = [];
     // 窗口迷你图卡（5h / 周 各一）
-    for (const w of windows) {
+    function collectWindowPoints(entries, key) {
+      const points = [];
+      for (const en of entries) {
+        const pv = windowPercentOf(en.data, key);
+        if (pv !== null) {
+          points.push({ x: en.time, y: pv });
+        }
+      }
+      return points;
+    }
+    function renderWindowCard(w) {
       const key = w.key;
-      const name = key === "5h" ? "5h 滚动" : key === "week" ? "每周" : key;
-      const color =
-        key === "5h"
-          ? "var(--dsw-alias-state-business-primary,#3b82f6)"
-          : "var(--dsw-alias-state-warn-primary,#c9820b)";
+      const name = windowName(key);
+      const color = windowColor(key);
       const pct = typeof w.percent === "number" ? w.percent : null;
       const resetText =
         w.nextResetTime !== undefined && w.nextResetTime !== null
           ? `重置 ${fmtReset(w.nextResetTime)}`
           : "";
-
       // 采样序列（v2 数据形态：entries[].data.windows[].percent）
-      const pcts = input.entries.map((en) => {
-        const arr = Array.isArray(en.data.windows) ? en.data.windows : [];
-        const v = arr.find((x) => x && x.key === key);
-        return v && typeof v.percent === "number" && Number.isFinite(v.percent) ? v.percent : null;
+      const pcts = input.entries.map(function (en) {
+        return windowPercentOf(en.data, key);
       });
       const hasPoint = pcts.some((v) => typeof v === "number");
-
       const head = `<div class="dou-cardHead">
         <div class="dou-cardMeta">
           <span class="dou-legendDot" style="background:${color}"></span>
@@ -420,15 +423,7 @@ export const zaiCodingCnAdapter = {
         </div>
         <p class="dou-cardLimit">${e(String(w.unit ?? ""))}${resetText !== "" ? ` · ${e(resetText)}` : ""}</p>
       </div>`;
-
-      const points = [];
-      for (const en of input.entries) {
-        const arr = Array.isArray(en.data.windows) ? en.data.windows : [];
-        const v = arr.find((x) => x && x.key === key);
-        if (v && typeof v.percent === "number" && Number.isFinite(v.percent)) {
-          points.push({ x: en.time, y: v.percent });
-        }
-      }
+      const points = collectWindowPoints(input.entries, key);
       let bodyHtml;
       if (points.length >= 2 && hasPoint) {
         const lo = Math.max(0, Math.min(...points.map((p) => p.y)) - 10);
@@ -447,21 +442,25 @@ export const zaiCodingCnAdapter = {
       } else {
         bodyHtml = `<p class="dou-chartEmpty">数据采集中：每次刷新记录一个采样点（约每 5 分钟一次），≥2 个点后显示趋势。</p>`;
       }
-      cards.push(`<div class="dou-card">${head}${bodyHtml}</div>`);
+      return `<div class="dou-card">${head}${bodyHtml}</div>`;
+    }
+    for (const w of windows) {
+      cards.push(renderWindowCard(w));
     }
 
     // 工具（TIME_LIMIT）卡条件渲染
-    if (latest.tools && typeof latest.tools.percent === "number") {
-      const t = latest.tools;
-      const used = t.currentValue;
-      const total = t.total;
-      const pct = Math.round(t.percent);
-      let bar = "";
-      if (used !== null && total !== null && total > 0) {
-        const bw = Math.min(100, Math.max(0, (used / total) * 100));
-        bar = `<div style="margin-top:6px;height:8px;background:var(--dsw-alias-border-l2,#e8eaf0);border-radius:4px;overflow:hidden"><div style="width:${bw.toFixed(1)}%;height:100%;background:var(--dsw-alias-state-warn-primary,#c9820b)"></div></div>`;
-      }
-      const toolsCard = `<div class="dou-card">
+    function renderToolsCard(latest) {
+      if (latest.tools && typeof latest.tools.percent === "number") {
+        const t = latest.tools;
+        const used = t.currentValue;
+        const total = t.total;
+        const pct = Math.round(t.percent);
+        let bar = "";
+        if (used !== null && total !== null && total > 0) {
+          const bw = Math.min(100, Math.max(0, (used / total) * 100));
+          bar = `<div style="margin-top:6px;height:8px;background:var(--dsw-alias-border-l2,#e8eaf0);border-radius:4px;overflow:hidden"><div style="width:${bw.toFixed(1)}%;height:100%;background:var(--dsw-alias-state-warn-primary,#c9820b)"></div></div>`;
+        }
+        const toolsCard = `<div class="dou-card">
         <div class="dou-cardHead">
           <div class="dou-cardMeta">
             <span class="dou-legendDot" style="background:var(--dsw-alias-state-warn-primary,#c9820b)"></span>
@@ -472,13 +471,32 @@ export const zaiCodingCnAdapter = {
         <p class="dou-cardLimit">${used !== null && total !== null ? `已用 ${used} / ${total}` : ""}</p>
         ${bar}
       </div>`;
-      cards.push(toolsCard);
+        return toolsCard;
+      }
+      return "";
     }
 
+    cards.push(renderToolsCard(latest));
     return cards.join("");
   },
 };
 
+const WINDOW_NAME = { "5h": "5h 滚动", week: "每周" };
+function windowName(key) {
+  return WINDOW_NAME[key] ?? key;
+}
+const WINDOW_COLOR = { "5h": "var(--dsw-alias-state-business-primary,#3b82f6)" };
+const WINDOW_COLOR_FALLBACK = "var(--dsw-alias-state-warn-primary,#c9820b)";
+function windowColor(key) {
+  return WINDOW_COLOR[key] ?? WINDOW_COLOR_FALLBACK;
+}
+function windowPercentOf(data, key) {
+  const arr = Array.isArray(data.windows) ? data.windows : [];
+  const v = arr.find(function (x) {
+    return x && x.key === key;
+  });
+  return v && typeof v.percent === "number" && Number.isFinite(v.percent) ? v.percent : null;
+}
 /** 重置时间格式化（epochMs → 本地中文短格式）。 */
 function fmtReset(ts) {
   const d = new Date(ts);

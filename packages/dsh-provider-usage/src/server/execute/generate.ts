@@ -246,6 +246,16 @@ async function resolveRoute(
  * 失败（路由不可解析/流异常/取消）→ ok:false 元数据（不抛，正文空串）；
  * 成功 → ok:true + 正文 + tokens（首个 usage chunk 为准）。
  */
+function accumulateChunk(
+  chunk: StreamChunk,
+  body: string,
+  tokens: ReportTokenUsage | null,
+): { body: string; tokens: ReportTokenUsage | null } {
+  if (chunk.type === "text-delta") return { body: body + chunk.text, tokens };
+  if (chunk.type === "usage" && tokens === null)
+    return { body, tokens: parseTokenUsage(chunk.usage) };
+  return { body, tokens };
+}
 export async function generateReport(opts: GenerateReportOptions): Promise<ReportResult> {
   const now = opts.now ?? Date.now;
   const started = now();
@@ -290,8 +300,9 @@ export async function generateReport(opts: GenerateReportOptions): Promise<Repor
   let tokens: ReportTokenUsage | null = null;
   try {
     for await (const chunk of opts.llm.stream(genOpts)) {
-      if (chunk.type === "text-delta") body += chunk.text;
-      else if (chunk.type === "usage" && tokens === null) tokens = parseTokenUsage(chunk.usage);
+      const acc = accumulateChunk(chunk, body, tokens);
+      body = acc.body;
+      tokens = acc.tokens;
     }
   } catch (e: unknown) {
     // 流异常/取消 → 失败元数据；调度层据 ok 决定是否推进 lastRun（接线层约定）
@@ -317,28 +328,70 @@ export async function generateReport(opts: GenerateReportOptions): Promise<Repor
  * （剥控制字符 + 截断 80——byDirectory 出口 basename 化，无路径分隔符），
  * 不含会话明细与完整路径——sanitizePaths 配置约束未来注入面扩展。
  */
-export function buildStatsSnapshot(input: {
-  period: ReportPeriod;
-  startDay: string;
-  endDay: string;
-  /** tracker.buckets() 快照（day 升序；day×provider×model×cell）。 */
+function cleanName(name: string): string {
+  const stripped = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  return stripped.length > 80 ? stripped.slice(0, 80) : stripped;
+}
+function cleanDir(dir: string): string {
+  const stripped = dir.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const cut = Math.max(stripped.lastIndexOf("/"), stripped.lastIndexOf("\\"));
+  const base = cut >= 0 ? stripped.slice(cut + 1) : stripped;
+  return base.length === 0 ? TREND_UNIDENTIFIED : cleanName(base);
+}
+function sanitizeSnapshotNames(
+  byProvider: Array<{
+    provider: string;
+    model: string | null;
+    calls: number;
+    total: number | null;
+  }>,
+  byDirectory: Array<{ dir: string; calls: number; total: number | null }>,
+): {
+  providers: Array<{ provider: string; model: string | null; calls: number; total: number | null }>;
+  directories: Array<{ dir: string; calls: number; total: number | null }>;
+} {
+  const providers = byProvider.map((row) => ({
+    provider: cleanName(row.provider),
+    model: row.model !== null ? cleanName(row.model) : null,
+    calls: row.calls,
+    total: row.total,
+  }));
+  const directories = byDirectory.map((row) => ({
+    dir: cleanDir(row.dir),
+    calls: row.calls,
+    total: row.total,
+  }));
+  return { providers: providers, directories: directories };
+}
+function inWindow(day: string, startDay: string, endDay: string): boolean {
+  return day >= startDay && day <= endDay;
+}
+function aggregateBucketWindow(
   buckets: Array<{
     day: string;
     providers: Array<{ provider: string; model: string | null; cell: TrendCell }>;
+  }>,
+  startDay: string,
+  endDay: string,
+): {
+  totals: {
+    calls: number;
+    turns: number;
+    toolCalls: number;
+    input: number | null;
+    output: number | null;
+    cacheRead: number | null;
+    cacheWrite: number | null;
+    total: number | null;
+  };
+  byDay: Array<{ day: string; total: number | null }>;
+  byProvider: Array<{
+    provider: string;
+    model: string | null;
+    calls: number;
+    total: number | null;
   }>;
-  /**
-   * 目录维度日汇总行快照（store.readAggDayShard 产物 filter kind:"dir"，
-   * 可选；缺省 = 旧数据无目录事实，不补造桶（旧格式零变化口径）。
-   */
-  dirRows?: TrendDirRow[];
-  /**
-   * 小时维度日汇总行快照（trend.hourRows() 产物，可选；缺省/旧数据无 hour
-   * 事实 → byHour/byPeriod/peakHour 依覆盖度守卫整体置 null（coveredDays=0）。
-   */
-  hourRows?: TrendHourRow[];
-  /** 上一同等长度窗口的指标总量（环比基准；接线层经 windowSummary 取得）。 */
-  prevTotal: number | null;
-}): ReportStatsSnapshot {
+} {
   const totals = {
     calls: 0,
     turns: 0,
@@ -354,79 +407,109 @@ export function buildStatsSnapshot(input: {
     string,
     { provider: string; model: string | null; calls: number; total: number | null }
   >();
-  for (const { day, providers } of input.buckets) {
-    if (day < input.startDay || day > input.endDay) continue;
+  for (const item of buckets) {
+    if (!inWindow(item.day, startDay, endDay)) {
+      continue;
+    }
     let dayTotal: number | null = null;
-    for (const { provider, model, cell } of providers) {
-      const total = metricValue(cell, "total");
-      totals.calls += cell.calls;
-      totals.turns += cell.turns;
-      totals.toolCalls += cell.toolCalls;
-      totals.input = sumToken(totals.input, cell.input);
-      totals.output = sumToken(totals.output, cell.output);
-      totals.cacheRead = sumToken(totals.cacheRead, cell.cacheRead);
-      totals.cacheWrite = sumToken(totals.cacheWrite, cell.cacheWrite);
+    for (const cell of item.providers) {
+      const total = metricValue(cell.cell, "total");
+      totals.calls += cell.cell.calls;
+      totals.turns += cell.cell.turns;
+      totals.toolCalls += cell.cell.toolCalls;
+      totals.input = sumToken(totals.input, cell.cell.input);
+      totals.output = sumToken(totals.output, cell.cell.output);
+      totals.cacheRead = sumToken(totals.cacheRead, cell.cell.cacheRead);
+      totals.cacheWrite = sumToken(totals.cacheWrite, cell.cell.cacheWrite);
       dayTotal = sumToken(dayTotal, total);
       totals.total = sumToken(totals.total, total);
-      const key = `${provider}\u0000${model ?? ""}`;
+      const key = cell.provider + "\u0000" + (cell.model ?? "");
       const cur = byKey.get(key);
-      if (cur === undefined) byKey.set(key, { provider, model, calls: cell.calls, total });
-      else {
-        cur.calls += cell.calls;
+      if (cur === undefined) {
+        byKey.set(key, {
+          provider: cell.provider,
+          model: cell.model,
+          calls: cell.cell.calls,
+          total: total,
+        });
+      } else {
+        cur.calls += cell.cell.calls;
         cur.total = sumToken(cur.total, total);
       }
     }
-    if (dayTotal !== null) byDay.push({ day, total: dayTotal });
+    if (dayTotal !== null) {
+      byDay.push({ day: item.day, total: dayTotal });
+    }
   }
-  const byProvider = [...byKey.values()].sort((a, b) => b.calls - a.calls);
-
-  // ---- 目录维度聚合（dir 行 → byDirectory，口径与 byProvider 一致）----
-  // 同 dir 键跨日 null-aware 累加；窗口过滤与 buckets 同口径（day 字典序闭区间）。
+  const byProvider = Array.from(byKey.values()).sort(function (a, b) {
+    return b.calls - a.calls;
+  });
+  return { totals: totals, byDay: byDay, byProvider: byProvider };
+}
+function aggregateDirWindow(
+  rows: TrendDirRow[] | undefined,
+  startDay: string,
+  endDay: string,
+): Map<string, { dir: string; calls: number; total: number | null }> {
   const byDir = new Map<string, { dir: string; calls: number; total: number | null }>();
-  for (const row of input.dirRows ?? []) {
-    if (row.day < input.startDay || row.day > input.endDay) continue;
+  for (const row of rows ?? []) {
+    if (!inWindow(row.day, startDay, endDay)) {
+      continue;
+    }
     const total = metricValue(row, "total");
     const cur = byDir.get(row.dir);
-    if (cur === undefined) byDir.set(row.dir, { dir: row.dir, calls: row.calls, total });
-    else {
+    if (cur === undefined) {
+      byDir.set(row.dir, { dir: row.dir, calls: row.calls, total: total });
+    } else {
       cur.calls += row.calls;
       cur.total = sumToken(cur.total, total);
     }
   }
-  const byDirectory = [...byDir.values()].sort((a, b) => b.calls - a.calls);
-
-  // ---- 年报派生维度（快照内单遍 O(n)，全部聚合数值，注入面收敛不变） ----
-  // 注入文本防御：provider/model 名为 adapter/上游可影响文本，进快照前截断 80 字符
-  // 并剥离控制字符（prompt 注入面收紧；快照数值维度不受影响）。
-  const safeName = (name: string): string => (name.length > 80 ? name.slice(0, 80) : name);
-  for (const row of byProvider) {
-    // 剥 C0 + DEL + C1（0x80–0x9F），与数据层 sanitizeDirName（collect/types.ts 权威定义）同口径
-    row.provider = safeName(row.provider.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
-    if (row.model !== null)
-      row.model = safeName(row.model.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
+  return byDir;
+}
+function aggregateHourWindow(
+  rows: TrendHourRow[] | undefined,
+  startDay: string,
+  endDay: string,
+): { cells: Map<number, { calls: number; total: number | null }>; covered: Set<string> } {
+  const cells = new Map<number, { calls: number; total: number | null }>();
+  const covered = new Set<string>();
+  for (const row of rows ?? []) {
+    if (!inWindow(row.day, startDay, endDay)) {
+      continue;
+    }
+    if (row.calls > 0 || row.turns > 0 || row.toolCalls > 0) {
+      covered.add(row.day);
+    }
+    const cur = cells.get(row.hour);
+    const total = metricValue(row, "total");
+    if (cur === undefined) {
+      cells.set(row.hour, { calls: row.calls, total: total });
+    } else {
+      cur.calls += row.calls;
+      cur.total = sumToken(cur.total, total);
+    }
   }
-  // 目录名出口统一 basename 化 + 剥控制字符 + 截断 80（沿用
-  // provider/model 的 safeName 防御模式；collector.dirOf 落盘前已 sanitizeDirName，
-  // 但伪造分片行的 dir 键不受信（isValidDirKey 只查长度）——出口处 basename 化
-  // 锁死「无路径分隔符」承诺，与逐出口断言对齐）。剥/切后为空串的伪键
-  // 归并进未识别桶键（防模板渲染空标签）。
-  for (const row of byDirectory) {
-    // 剥 C0 + DEL + C1，与数据层 sanitizeDirName 同口径
-    const c = row.dir.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-    const cut = Math.max(c.lastIndexOf("/"), c.lastIndexOf("\\"));
-    const base = cut >= 0 ? c.slice(cut + 1) : c;
-    row.dir = base.length === 0 ? TREND_UNIDENTIFIED : safeName(base);
-  }
-  // 峰值日：byDay（升序）内 total 最大；并列取最早一天
+  return { cells: cells, covered: covered };
+}
+function avgForActive(total: number | null, activeDays: number): number | null {
+  if (activeDays <= 0 || total === null) return null;
+  return total / activeDays;
+}
+function statsPeak(
+  byDay: Array<{ day: string; total: number | null }>,
+  totals: { total: number | null },
+  startDay: string,
+  endDay: string,
+) {
   let peakDay: { day: string; total: number | null } | null = null;
   for (const d of byDay) {
     if (peakDay === null || (d.total ?? 0) > (peakDay.total ?? 0)) peakDay = d;
   }
   // 活跃天数 / 窗口天数 / 活跃日均
   const activeDays = byDay.length;
-  const windowDays = windowDayCount(input.startDay, input.endDay);
-  const totalForAvg = totals.total;
-  const avgPerActiveDay = activeDays > 0 && totalForAvg !== null ? totalForAvg / activeDays : null;
+  const windowDays = windowDayCount(startDay, endDay);
+  const avgPerActiveDay = avgForActive(totals.total, activeDays);
   // 最长连续活跃天数：day 排序后以日历日差 = 1 判定连续（bucket day 为 UTC day key，
   // 经 Date UTC 解析求差，跨月/跨年安全——与窗口天数计算同源口径）
   let longestStreak = 0;
@@ -440,10 +523,21 @@ export function buildStatsSnapshot(input: {
     prevDay = ts;
   }
   // 环比：prevTotal 缺失或 <= 0 → null（不做对比；防 Infinity）
+  return {
+    peakDay: peakDay,
+    activeDays: activeDays,
+    windowDays: windowDays,
+    avgPerActiveDay: avgPerActiveDay,
+    longestStreak: longestStreak,
+  };
+}
+function statsRatio(
+  byDay: Array<{ day: string; total: number | null }>,
+  totals: { total: number | null },
+  prevTotal: number | null,
+) {
   const wowRatio =
-    input.prevTotal !== null && input.prevTotal > 0 && totals.total !== null
-      ? totals.total / input.prevTotal
-      : null;
+    prevTotal !== null && prevTotal > 0 && totals.total !== null ? totals.total / prevTotal : null;
   // 星期分布：周一..周日（bucket day 为 UTC key，星期口径与 day 生成处一致用 UTC 星期，
   // 避免「按本地构造 day key 却按本地星期统计」的口径漂移——快照内自洽即可）
   const byWeekday: [number, number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0, 0];
@@ -458,21 +552,16 @@ export function buildStatsSnapshot(input: {
   // 事实（calls/turns/toolCalls 任一 > 0）的天数；coveredDays < windowDays（升级期
   // 部分天缺 hour 行）→ 三个时段字段整体置 null（提示词整段降级，杜绝「局部天代表
   // 全窗口」的误导叙事）。
-  const hourCells = new Map<number, { calls: number; total: number | null }>();
-  const covered = new Set<string>();
-  for (const row of input.hourRows ?? []) {
-    if (row.day < input.startDay || row.day > input.endDay) continue;
-    if (row.calls > 0 || row.turns > 0 || row.toolCalls > 0) covered.add(row.day);
-    const cur = hourCells.get(row.hour);
-    const total = metricValue(row, "total");
-    if (cur === undefined) hourCells.set(row.hour, { calls: row.calls, total });
-    else {
-      cur.calls += row.calls;
-      cur.total = sumToken(cur.total, total);
-    }
-  }
+  return { wowRatio: wowRatio, byWeekday: byWeekday };
+}
+function deriveHourStats(
+  hourCells: Map<number, { calls: number; total: number | null }>,
+  covered: Set<string>,
+  windowDays: number,
+  hourRows: TrendHourRow[] | undefined,
+) {
   const coveredDays = covered.size;
-  const hourCovered = (input.hourRows ?? []).length > 0 && coveredDays >= windowDays;
+  const hourCovered = (hourRows ?? []).length > 0 && coveredDays >= windowDays;
   let byHour: ReportStatsSnapshot["byHour"] = null;
   let byPeriod: ReportStatsSnapshot["byPeriod"] = null;
   let peakHour: ReportStatsSnapshot["peakHour"] = null;
@@ -506,14 +595,67 @@ export function buildStatsSnapshot(input: {
     peakHour = peak;
   }
 
+  return { byHour: byHour, byPeriod: byPeriod, peakHour: peakHour, coveredDays: coveredDays };
+}
+export function buildStatsSnapshot(input: {
+  period: ReportPeriod;
+  startDay: string;
+  endDay: string;
+  /** tracker.buckets() 快照（day 升序；day×provider×model×cell）。 */
+  buckets: Array<{
+    day: string;
+    providers: Array<{ provider: string; model: string | null; cell: TrendCell }>;
+  }>;
+  /**
+   * 目录维度日汇总行快照（store.readAggDayShard 产物 filter kind:"dir"，
+   * 可选；缺省 = 旧数据无目录事实，不补造桶（旧格式零变化口径）。
+   */
+  dirRows?: TrendDirRow[];
+  /**
+   * 小时维度日汇总行快照（trend.hourRows() 产物，可选；缺省/旧数据无 hour
+   * 事实 → byHour/byPeriod/peakHour 依覆盖度守卫整体置 null（coveredDays=0）。
+   */
+  hourRows?: TrendHourRow[];
+  /** 上一同等长度窗口的指标总量（环比基准；接线层经 windowSummary 取得）。 */
+  prevTotal: number | null;
+}): ReportStatsSnapshot {
+  const { totals, byDay, byProvider } = aggregateBucketWindow(
+    input.buckets,
+    input.startDay,
+    input.endDay,
+  );
+
+  // ---- 目录维度聚合（dir 行 → byDirectory，口径与 byProvider 一致）----
+  // 同 dir 键跨日 null-aware 累加；窗口过滤与 buckets 同口径（day 字典序闭区间）。
+  const byDir = aggregateDirWindow(input.dirRows, input.startDay, input.endDay);
+  const byDirectory = [...byDir.values()].sort((a, b) => b.calls - a.calls);
+
+  // ---- 年报派生维度（快照内单遍 O(n)，全部聚合数值，注入面收敛不变） ----
+  // 注入文本防御：provider/model 名为 adapter/上游可影响文本，进快照前截断 80 字符
+  // 并剥离控制字符（prompt 注入面收紧；快照数值维度不受影响）。
+  const clean = sanitizeSnapshotNames(byProvider, byDirectory);
+  const { peakDay, activeDays, windowDays, avgPerActiveDay, longestStreak } = statsPeak(
+    byDay,
+    totals,
+    input.startDay,
+    input.endDay,
+  );
+  const { wowRatio, byWeekday } = statsRatio(byDay, totals, input.prevTotal);
+  const hourAgg = aggregateHourWindow(input.hourRows, input.startDay, input.endDay);
+  const { byHour, byPeriod, peakHour, coveredDays } = deriveHourStats(
+    hourAgg.cells,
+    hourAgg.covered,
+    windowDays,
+    input.hourRows,
+  );
   return {
     period: input.period,
     startDay: input.startDay,
     endDay: input.endDay,
     totals,
     byDay,
-    byProvider,
-    byDirectory,
+    byProvider: clean.providers,
+    byDirectory: clean.directories,
     prevTotal: input.prevTotal,
     peakDay,
     activeDays,
