@@ -6,14 +6,14 @@
  * - output 附 JSON 渲染（文本块），失败包络同样可读（无概率字段）；
  * - ws_list_verdict_guides 只读（不记录历史、不触网络）。
  */
-import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
+import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import type { CustomPreset } from "../../../shared/interface.ts";
 import type { DecideDeps } from "../deps.ts";
 import { decide, listPresets } from "./service.ts";
 
 /** 工具装配（组合根绑定：exec→deps 映射 + 快照取数）。 */
 export interface ToolAssembly {
-  readonly depsFor: (exec: unknown) => DecideDeps;
+  readonly depsFor: (exec: ToolRunContext) => DecideDeps;
   readonly snapshot: () => {
     readonly isEnabled: (presetId: string) => boolean;
     readonly capOf: (presetId: string) => number;
@@ -149,7 +149,7 @@ export function buildToolDefinitions(assembly: ToolAssembly): ToolDefinition[] {
       render: renderJson,
     },
     isConcurrencySafe: () => true,
-    execute: (args: unknown, exec: unknown) => {
+    execute: (args: unknown, exec: ToolRunContext) => {
       const base = assembly.depsFor(exec);
       return decide(args, base);
     },

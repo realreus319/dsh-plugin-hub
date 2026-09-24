@@ -5,7 +5,7 @@
  * - summarizeToolDescriptions：排序取首非空、trim/空白折叠、空集 undefined
  * - composeCatalogEntries：description 优先、缓存回落、maxEntries 截断
  * - digestCatalogEntries：只含 name、顺序敏感
- * - escapeCatalogText / findCatalogMessage / readCatalogEntries 坏数据面
+ * - escapeCatalogText / findCatalogMessage / V4 reader 坏数据面
  * - catalogHistory：倒序扫描、可见性过滤、published 标记
  * - renderMcpCatalogMessage / renderMcpCatalogUpdate 形状
  * - resolveCatalogInjection 六条决策路径
@@ -24,7 +24,6 @@ const {
   renderMcpCatalogMessage,
   escapeCatalogText,
   findCatalogMessage,
-  readCatalogEntries,
   isCatalogSource,
   resolveCatalogEntries,
   catalogHistory,
@@ -281,38 +280,9 @@ describe("catalog name escape（#770-4）", () => {
     expect(text.includes(`- \`${escapeCatalogText(evilName)}\``)).toBe(true);
     expect(text.includes(evilName)).toBe(false);
   });
-
-  it("render→parse 回环逐字相等（删解转义即红）", () => {
-    // 回读须还原原始名，否则注入比对恒不等、每轮误发修正帧；预转义名同时约束渲染侧不断删转义。
-    const entries = [
-      { name: evilName, text: evilText },
-      { name: "plain" },
-      { name: "pre&lt;escaped", text: "t&amp;1" },
-    ];
-    const message = renderMcpCatalogMessage(entries);
-    expect(resolveCatalogEntries(message.source)).toEqual(entries);
-  });
-
-  it("digest 稳定：转义前后同一条目 digest 不变且复用既有目录", () => {
-    // 摘要只含原始名：转义是展现层手段，不进入去重口径，回读后 digest 一致即无重注。
-    const entries = [{ name: evilName, text: evilText }];
-    const before = digestCatalogEntries(entries);
-    const message = renderMcpCatalogMessage(entries);
-    const back = resolveCatalogEntries(message.source)!;
-    expect(digestCatalogEntries(back)).toBe(before);
-    const decision = { kind: "enter", messages: [message] };
-    const supervisors = new Map([
-      [
-        evilName,
-        { server: { name: evilName, transport: "stdio" as const, description: evilText } },
-      ],
-    ]);
-    const reused = resolveCatalogInjection(decision, [], supervisors, 6, new Map(), undefined);
-    expect(reused).toBe(decision);
-  });
 });
 
-describe("renderMcpCatalogMessage / findCatalogMessage / readCatalogEntries", () => {
+describe("renderMcpCatalogMessage / findCatalogMessage / V4 reader", () => {
   const makeMessage = () => renderMcpCatalogMessage([{ name: "m1", text: "t<1" }]);
 
   it("message.role 为 user", () => {
@@ -323,11 +293,15 @@ describe("renderMcpCatalogMessage / findCatalogMessage / readCatalogEntries", ()
     expect(makeMessage().id).toBeTruthy();
   });
 
-  it("#723 message.source 为宿主词表内的 plugin/snapshot 形态（自造 kind 会被迁移白名单拒绝）", () => {
-    const source = makeMessage().source!;
-    expect(source.kind).toBe("plugin");
-    expect(source.plugin).toBe("@wingsky-1/dsh-mcp-manager");
-    expect(source.form).toBe("snapshot");
+  it("message.source 为 producer-owned V4 snapshot 形态（无 plugin wrapper）", () => {
+    const message = makeMessage();
+    const source = message.source!;
+    expect(source).toEqual({
+      kind: "plugin:@wingsky-1/dsh-mcp-manager",
+      form: "snapshot",
+      sections: [{ name: "mcp-catalog", text: message.content![0]!.text! }],
+    });
+    expect(Object.hasOwn(source, "plugin"), "V4 source 不携带旧 plugin 字段").toBe(false);
     expect(isCatalogSource(source)).toBe(true);
   });
 
@@ -339,9 +313,9 @@ describe("renderMcpCatalogMessage / findCatalogMessage / readCatalogEntries", ()
     expect(makeMessage().content![0]!.text!.includes("- `m1`: t&lt;1")).toBeTruthy();
   });
 
-  it("文本含 does not reflect active connection status", () => {
+  it("文本含 capability snapshot 首部", () => {
     expect(
-      makeMessage().content![0]!.text!.includes("does not reflect active connection status"),
+      makeMessage().content![0]!.text!.includes("Available MCP servers (capability snapshot):"),
     ).toBeTruthy();
   });
 
@@ -364,40 +338,15 @@ describe("renderMcpCatalogMessage / findCatalogMessage / readCatalogEntries", ()
     expect(findCatalogMessage([undefined, null] as unknown as CatalogMessage[])).toBeUndefined();
   });
 
-  it("#723 新形态走 resolveCatalogEntries 读回条目", () => {
-    const message = makeMessage();
-    expect(resolveCatalogEntries(message.source)).toEqual([{ name: "m1", text: "t<1" }]);
-  });
-
-  it("readCatalogEntries(undefined) undefined", () => {
-    expect(readCatalogEntries(undefined)).toBeUndefined();
-  });
-
-  it("readCatalogEntries({}) undefined", () => {
-    expect(readCatalogEntries({})).toBeUndefined();
-  });
-
-  it("entries 非 Array → undefined", () => {
-    expect(readCatalogEntries({ entries: "nope" })).toBeUndefined();
-  });
-
-  it("entry 非对象 → undefined", () => {
-    expect(readCatalogEntries({ entries: [1] })).toBeUndefined();
-  });
-
-  it("缺 name → undefined", () => {
-    expect(readCatalogEntries({ entries: [{ text: "x" }] })).toBeUndefined();
-  });
-
-  it("空 name → undefined", () => {
-    expect(readCatalogEntries({ entries: [{ name: "" }] })).toBeUndefined();
-  });
-
-  it("非字符串 text 归一为 undefined", () => {
-    expect(readCatalogEntries({ entries: [{ name: "n", text: 5 }, { name: "m" }] })).toEqual([
-      { name: "n", text: undefined },
-      { name: "m", text: undefined },
-    ]);
+  it("业务 reader 不把 V3 plugin wrapper 当作当前目录 source", () => {
+    const legacy = {
+      kind: "plugin",
+      plugin: "@wingsky-1/dsh-mcp-manager",
+      form: "snapshot",
+      sections: [{ name: "mcp-catalog", text: "legacy" }],
+    };
+    expect(isCatalogSource(legacy)).toBe(false);
+    expect(resolveCatalogEntries(legacy as unknown as CatalogSourceLike)).toBeUndefined();
   });
 });
 
@@ -410,8 +359,18 @@ describe("renderMcpCatalogUpdate", () => {
 
   it("替换声明", () => {
     expect(
-      makeText().includes("This catalog replaces all previous available_mcp_servers"),
+      makeText().includes("this replaces all previous available_mcp_servers lists:"),
     ).toBeTruthy();
+  });
+
+  it("content 与 source section 共用完整 assembled text", () => {
+    const message = renderMcpCatalogUpdate([{ name: "u1", text: "t<1" }]);
+    const contentText = message.content![0]!.text!;
+    const section = (message.source!.sections as Array<{ name: string; text: string }>)[0]!;
+
+    expect(section.text).toBe(contentText);
+    expect(section.text).toContain("MCP catalog updated");
+    expect(section.text).toContain("this replaces all previous available_mcp_servers lists:");
   });
 
   it("内层裁掉原头部说明", () => {
@@ -425,10 +384,13 @@ describe("renderMcpCatalogUpdate", () => {
 
 describe("catalogHistory", () => {
   const entry = [{ name: "h1", text: "t" }];
+  // snapshot 新形夹具：经渲染函数组装 source，保证与线上写入同一形状。
+  const snapSource = (entries: Array<{ name: string; text?: string }>) =>
+    renderMcpCatalogMessage(entries).source!;
   const event = (seq: number, _visible?: unknown) => ({
     type: "user/message",
     seq,
-    data: { source: { kind: "mcp-catalog", entries: entry } },
+    data: { source: snapSource(entry) },
   });
 
   it("无 agent → {published:false}", () => {
@@ -454,7 +416,7 @@ describe("catalogHistory", () => {
           {
             type: "user/message",
             seq: 5,
-            data: { source: { kind: "mcp-catalog", entries: entry } },
+            data: { source: snapSource(entry) },
           },
           event(7),
           { type: "user/message", seq: 8, data: { source: { kind: "other" } } },
@@ -477,7 +439,7 @@ describe("catalogHistory", () => {
 
   it("跳过坏数据命中更早的可见消息", () => {
     const digest = digestCatalogEntries(entry);
-    // 坏 entries 的目录消息跳过继续向前找。
+    // 坏快照正文（无 available_mcp_servers 块）的目录消息跳过继续向前找。
     const agentBadThenGood = {
       session: {
         surface: { nodes: [1] },
@@ -486,7 +448,13 @@ describe("catalogHistory", () => {
           {
             type: "user/message",
             seq: 2,
-            data: { source: { kind: "mcp-catalog", entries: "bad" } },
+            data: {
+              source: {
+                kind: "plugin:@wingsky-1/dsh-mcp-manager",
+                form: "snapshot",
+                sections: [{ name: "mcp-catalog", text: "garbage" }],
+              },
+            },
           },
         ],
       },
@@ -522,7 +490,7 @@ describe("resolveCatalogInjection：六条路径", () => {
             {
               type: "user/message",
               seq: 1,
-              data: { source: { kind: "mcp-catalog", entries: entry } },
+              data: { source: renderMcpCatalogMessage(entry).source! },
             },
           ],
         },
@@ -538,7 +506,7 @@ describe("resolveCatalogInjection：六条路径", () => {
           {
             type: "user/message",
             seq: 1,
-            data: { source: { kind: "mcp-catalog", entries: [{ name: "old" }] } },
+            data: { source: renderMcpCatalogMessage([{ name: "old" }]).source! },
           },
         ],
       },
@@ -657,7 +625,9 @@ describe("resolveCatalogInjection：六条路径", () => {
       undefined,
     );
     expect(
-      injected.messages[0]!.content![0]!.text!.includes("Configured MCP servers in this session"),
+      injected.messages[0]!.content![0]!.text!.includes(
+        "Available MCP servers (capability snapshot):",
+      ),
     ).toBeTruthy();
   });
 
@@ -671,9 +641,7 @@ describe("resolveCatalogInjection：六条路径", () => {
       new Map(),
       otherDigestAgent(),
     );
-    expect(
-      updated.messages[0]!.content![0]!.text!.includes("MCP server configuration has changed"),
-    ).toBeTruthy();
+    expect(updated.messages[0]!.content![0]!.text!.includes("MCP catalog updated")).toBeTruthy();
   });
 
   it("本轮已有旧目录且 digest 变化 → 替换不追加", () => {
@@ -713,9 +681,7 @@ describe("resolveCatalogInjection：六条路径", () => {
       new Map(),
       otherDigestAgent(),
     );
-    expect(
-      replaced.messages[1]!.content![0]!.text!.includes("MCP server configuration has changed"),
-    ).toBeTruthy();
+    expect(replaced.messages[1]!.content![0]!.text!.includes("MCP catalog updated")).toBeTruthy();
   });
 
   it("替换后 id 与旧目录不同", () => {
@@ -732,23 +698,11 @@ describe("resolveCatalogInjection：六条路径", () => {
   });
 });
 
-// #723：目录 source 新旧两代双识别 —— 写入侧已改宿主通用形态，读取侧必须同时认旧形态
-// （升级前的会话），否则 digest 恒不等、每轮误判"目录已变"而重复注入修正帧。
-describe("#723 目录 source 双形态识别", () => {
+// V4 reader 只认 producer-owned snapshot；旧 source 由 maintenance/upgrade 负责。
+describe("#723 目录 source 快照识别", () => {
   it("resolveCatalogEntries 从快照正文单射还原条目（含反转义）", () => {
     const message = renderMcpCatalogMessage([{ name: "m1", text: "t<1" }]);
     expect(resolveCatalogEntries(message.source)).toEqual([{ name: "m1", text: "t<1" }]);
-  });
-
-  it("readCatalogEntries 仍读旧形态（跨版本兼容）", () => {
-    // 旧形态 source 带 kind/form：类型面只认 { entries }，此处故意传入完整旧形状探兼容。
-    expect(
-      readCatalogEntries({
-        kind: "mcp-catalog",
-        form: "catalog",
-        entries: [{ name: "m1", text: "t<1" }],
-      } as unknown as { entries?: unknown }),
-    ).toEqual([{ name: "m1", text: "t<1" }]);
   });
 
   it("resolveCatalogEntries 坏数据面一律 undefined", () => {
@@ -781,7 +735,7 @@ describe("#723 目录 source 双形态识别", () => {
   });
 });
 
-describe("#723 catalogHistory 双形态识别", () => {
+describe("#723 catalogHistory 快照识别", () => {
   const entries = [{ name: "s", text: "d" }];
   const digest = digestCatalogEntries(entries);
   const body = [
@@ -791,14 +745,11 @@ describe("#723 catalogHistory 双形态识别", () => {
     "</available_mcp_servers>",
     "</system-reminder>",
   ].join("\n");
-  // 新形态 source 含 form：类型面最小面未收 form（只读 kind/plugin/entries/sections），此处收窄不断言。
   const newSource = {
-    kind: "plugin",
-    plugin: "@wingsky-1/dsh-mcp-manager",
+    kind: "plugin:@wingsky-1/dsh-mcp-manager",
     form: "snapshot",
     sections: [{ name: "mcp-catalog", text: body }],
   } as unknown as CatalogSourceLike;
-  // source 取 CatalogSourceLike 最小面：超出该面的 form 等旧形态字段由调用方收窄（见 #723 节）。
   const agentOf = (nodes: unknown[], source: CatalogSourceLike) => ({
     session: {
       surface: { nodes },
@@ -817,7 +768,7 @@ describe("#723 catalogHistory 双形态识别", () => {
     expect(catalogHistory(agentOf([], newSource))).toEqual({ published: true });
   });
 
-  it("旧形态仍被识别（同一 digest 口径）", () => {
+  it("旧形态不再识别（落盘迁移走 maintenance，不在业务 reader 兼容）", () => {
     expect(
       catalogHistory(
         agentOf([1], {
@@ -826,20 +777,52 @@ describe("#723 catalogHistory 双形态识别", () => {
           entries,
         } as unknown as CatalogSourceLike),
       ),
-    ).toEqual({ visibleDigest: digest, published: true });
+    ).toEqual({ published: false });
   });
 
-  it("他插件的 plugin 消息不得被误认", () => {
+  it("V3 plugin wrapper 不得被业务 reader 识别", () => {
     expect(
       catalogHistory(
         agentOf([1], {
           kind: "plugin",
-          plugin: "other",
+          plugin: "@wingsky-1/dsh-mcp-manager",
           form: "snapshot",
           sections: [{ name: "mcp-catalog", text: body }],
         } as unknown as CatalogSourceLike),
       ),
     ).toEqual({ published: false });
+  });
+});
+
+// V4：producer-owned kind 识别；段名仍为自有 mcp-catalog 命名空间。
+describe("V4 catalog source 识别", () => {
+  it("只认本插件 producer-owned kind", () => {
+    expect(isCatalogSource({ kind: "plugin:@wingsky-1/dsh-mcp-manager" })).toBe(true);
+  });
+
+  it("不认 V3 plugin wrapper、旧 kind 或其他 producer", () => {
+    expect(
+      isCatalogSource({ kind: "plugin", plugin: "@wingsky-1/dsh-mcp-manager" } as unknown as {
+        kind?: unknown;
+      }),
+    ).toBe(false);
+    expect(isCatalogSource({ kind: "mcp-catalog" })).toBe(false);
+    expect(isCatalogSource({ kind: "plugin:@other/producer" })).toBe(false);
+    expect(isCatalogSource(undefined)).toBe(false);
+  });
+
+  it("writer 精确产出 V4 source，且无 plugin 字段", () => {
+    for (const source of [
+      renderMcpCatalogMessage([{ name: "k1", text: "t" }]).source!,
+      renderMcpCatalogUpdate([{ name: "k1", text: "t" }]).source!,
+    ]) {
+      expect(source).toEqual({
+        kind: "plugin:@wingsky-1/dsh-mcp-manager",
+        form: "snapshot",
+        sections: [{ name: "mcp-catalog", text: expect.any(String) }],
+      });
+      expect(Object.hasOwn(source, "plugin")).toBe(false);
+    }
   });
 });
 

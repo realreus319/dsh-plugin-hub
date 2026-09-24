@@ -1,12 +1,12 @@
 /**
  * onboarding.mjs — 隔离环境 dsh web 首启弹窗的默认跳过支持（纯函数 + 只读探测）。
  *
- * 两个阻断弹窗的成因（实测 dsh 0.1.5-rc.1，复现与对照见 SKILL.md
+ * 两个阻断弹窗的成因（目标 dsh 0.1.7-rc.1，复现与对照见 SKILL.md
  * 「首启弹窗默认跳过」）：
  *   - 「内测声明」是否出现，取决于 settings.yaml 的
- *     `ui-onboarding.welcomeNoticeVersion` 与客户端常量 WELCOME_NOTICE_VERSION
- *     是否**精确相等**：预置该值即默认不弹。常量随 dsh 版本漂移（它按版本重新
- *     告知），只能从 dsh 产物现取——硬编码会让跳过在 dsh 升级后静默失效。
+ *     `<namespace>.welcomeNoticeVersion` 与客户端常量 WELCOME_NOTICE_VERSION
+ *     是否**精确相等**：预置该值即默认不弹。命名空间与版本均随 dsh 版本漂移，
+ *     只能从同一份 dsh 产物现取；任一事实缺失都不预置，交给浏览器导航后兜底。
  *   - 「添加 API Key」由 provider 可用性决定，其「稍后配置」只在当前页面生命周期
  *     内有效（刷新/新标签必重弹），预置消除不掉，只能导航后兜底点击。
  * 两者都把应用根置为 inert（`#root.inert = true`），页面上一切点击静默失效——这
@@ -25,8 +25,13 @@ export const SKIP_BUTTON_TEXTS = Object.freeze(["Continue", "Configure later", "
 /** 客户端产物里的须知版本常量；版本一变就会重新弹窗，故按 dsh 安装现取。 */
 export const WELCOME_NOTICE_VERSION_RE = /WELCOME_NOTICE_VERSION\s*=\s*"([^"]+)"/;
 
-/** 设置文档命名空间与字段（与客户端 onboarding-copy 常量对齐）。 */
-export const WELCOME_SETTINGS_NAMESPACE = "ui-onboarding";
+/**
+ * 客户端产物里的须知命名空间常量（与客户端 onboarding-copy 同名常量对齐，
+ * 与目标 dsh 客户端产物同名常量对齐）；正则现取，单源。
+ */
+export const WELCOME_NOTICE_SETTINGS_NAMESPACE_RE =
+  /WELCOME_NOTICE_SETTINGS_NAMESPACE\s*=\s*"([^"]+)"/;
+
 export const WELCOME_SETTINGS_FIELD = "welcomeNoticeVersion";
 
 /** 缺访问令牌时 GUI 的鉴权拒绝文案（页面命令据此给出可操作诊断而非空页假绿）。 */
@@ -46,17 +51,31 @@ export function extractWelcomeNoticeVersion(source) {
 }
 
 /**
+ * 从客户端产物源码提取须知命名空间（与 WELCOME_NOTICE_SETTINGS_NAMESPACE 同名常量对齐）。
+ * @param source - dsh-client-ui-settings-models 的 client.js 源码。
+ * @returns 命名空间字符串；未匹配返回 null，调用方不得预置。
+ */
+export function extractWelcomeNoticeNamespace(source) {
+  const m = WELCOME_NOTICE_SETTINGS_NAMESPACE_RE.exec(String(source ?? ""));
+  return m ? m[1] : null;
+}
+
+/**
  * 构造预置的 settings.yaml 文档。
  * @param version - 已确认的须知版本（原样落盘，加引号会改变解析结果，故不加）。
+ * @param namespace - 从 dsh 产物现取的设置命名空间（必填）。
  * @returns 设置文档文本。
  */
-export function welcomeSettingsDocument(version) {
-  // 值来自 dsh 产物的字符串字面量，仍按白名单校验：settings.yaml 是要被 dsh 解析的
-  // 结构化文档，任何意外字符都可能改写命名空间结构而不是一个字段值。
-  if (!/^[A-Za-z0-9._-]+$/.test(String(version))) {
+export function welcomeSettingsDocument(version, namespace) {
+  // 值与命名空间来自 dsh 产物的字符串字面量，仍按白名单校验：settings.yaml 是要被
+  // dsh 解析的结构化文档，任何意外字符都可能改写命名空间结构而不是一个字段值。
+  if (typeof version !== "string" || !/^[A-Za-z0-9._-]+$/.test(version)) {
     throw new Error(`内测声明版本含意外字符，拒绝写入 settings.yaml: ${version}`);
   }
-  return `${WELCOME_SETTINGS_NAMESPACE}:\n  ${WELCOME_SETTINGS_FIELD}: ${version}\n`;
+  if (typeof namespace !== "string" || !/^[A-Za-z0-9._-]+$/.test(namespace)) {
+    throw new Error(`设置命名空间缺失或含意外字符，拒绝写入 settings.yaml: ${namespace}`);
+  }
+  return `${namespace}:\n  ${WELCOME_SETTINGS_FIELD}: ${version}\n`;
 }
 
 /**
@@ -103,17 +122,21 @@ export function welcomeClientFileOf(dshRoot) {
 }
 
 /**
- * 端到端解析须知版本（dsh 入口 → 安装根 → 客户端产物 → 常量）。
+ * 端到端解析须知版本与命名空间（dsh 入口 → 安装根 → 客户端产物 → 常量）。
+ * 两项事实只从同一份官方产物读取；任一项缺失都不构造部分事实。
  * @param dshBinPath - dsh 可执行入口。
- * @returns `{ version, file }`；任一步失败返回 null。
+ * @returns `{ version, namespace, file }`；版本或命名空间任一步失败返回 null。
  */
 export function findWelcomeNoticeVersion(dshBinPath) {
   const root = dshRootOf(dshBinPath);
   if (!root) return null;
   const file = welcomeClientFileOf(root);
   if (!file || !existsSync(file)) return null;
-  const version = extractWelcomeNoticeVersion(readFileSync(file, "utf8"));
-  return version ? { version, file } : null;
+  const source = readFileSync(file, "utf8");
+  const version = extractWelcomeNoticeVersion(source);
+  const namespace = extractWelcomeNoticeNamespace(source);
+  if (!version || !namespace) return null;
+  return { version, namespace, file };
 }
 
 /**

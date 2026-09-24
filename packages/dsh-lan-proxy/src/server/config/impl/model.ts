@@ -93,8 +93,8 @@ export interface HttpCompressSnapshot {
 }
 
 /** 插件配置，由同名 schemastery schema 校验，也用于 GUI 设置面板渲染。
- * 显式注解：官方类型层与本包 devDep schemastery 各带同名全局命名空间合并后，
- * Config 的推断类型声明发射不再可移植（TS2883），按 TS 建议显式标注。 */
+ * 显式注解（TS2883：全局命名空间合并致推断类型声明发射不可移植）+ 末尾 as 收口
+ * （合并后的 Mode 条件类型使直接赋值判红 TS2322；as 保持类型面，值面无变化）。 */
 export const Config: z<LanProxyConfig> = z.object({
   /** 总开关。 */
   enabled: z.boolean().default(true),
@@ -179,7 +179,12 @@ export const Config: z<LanProxyConfig> = z.object({
    * 兼容开关，解锁面与替代路径见 README「安全模型」。
    */
   ownsHostCompat: z.boolean().default(false),
-});
+  // 末尾 as 收口（见文件头注释）：合并后的 Mode 条件类型使直接赋值判红，
+  // as 保持对外类型面恒为 z<LanProxyConfig>，值面无任何变化。
+}) as z<LanProxyConfig>;
+
+/** 整节标记 volatile： hot 更新免 remount。直接置 meta（链式写法在锁版 schemastery 无此方法）。 */
+(Config as unknown as { meta: { volatile?: boolean } }).meta.volatile = true;
 
 /**
  * 默认配置（键集 = schema 中带 `.default()` 的字段）。从 schema 归一化**空输入**派生，

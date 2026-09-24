@@ -226,6 +226,24 @@
       "consumers": ["scripts/lib/config-matrix-gate.ts"]
     },
     {
+      "path": "stryker.conf.d/shared-settings-namespace.json",
+      "faces": [],
+      "consumerGap": {
+        "kind": "indirect",
+        "reason": "stryker 经 stryker.conf.d/shared-settings-namespace.json 的 vitest.configFile 读取；该段由 scripts/gate/gen-stryker-conf.mjs 从 mutation-topology.json 的 $rootShared.segments.settings-namespace 间接派生，不含逐文件字面量。"
+      },
+      "why": "$rootShared 段的生成配置：不属于包级增量切片，由常驻 stryker:check 校验其与拓扑一致。"
+    },
+    {
+      "path": "vitest.stryker.d/shared-settings-namespace.config.ts",
+      "faces": [],
+      "consumerGap": {
+        "kind": "indirect",
+        "reason": "stryker 经 stryker.conf.d/shared-settings-namespace.json 的 vitest.configFile 读取；该文件由 scripts/gate/gen-stryker-conf.mjs 从 $rootShared 段的 testFiles 间接派生，不含逐文件字面量。"
+      },
+      "why": "$rootShared 段的生成测试面配置：不属于包级增量切片，由常驻 stryker:check 校验其与拓扑一致。"
+    },
+    {
       "path": "stryker.conf.d/dsh-notifier*.json",
       "invalidatesBaseline": true,
       "faces": ["dsh-notifier"],

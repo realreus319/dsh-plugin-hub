@@ -9,6 +9,7 @@ export default defineConfig({
   test: {
     include: [
       'packages/dsh-worktree-sidebar/test/client-dom/inject-visibility.test.ts',
+      'packages/dsh-worktree-sidebar/test/client-unit/inject-keep-mounted.test.ts',
       'packages/dsh-worktree-sidebar/test/integration/apply-lifecycle.test.ts',
       'packages/dsh-worktree-sidebar/test/integration/binding-store.test.ts',
       'packages/dsh-worktree-sidebar/test/integration/file-io-concurrency.test.ts',

@@ -33,7 +33,12 @@ import { normalizeLegacyWsCompressPaths, DEFAULT_WSS_COMPRESS_PATHS } from "./co
 import type { HttpCompressSnapshot, LanProxyConfig, ResolvedConfig } from "./config/interface.ts";
 import { SETTINGS_NS, installLanProxySettings, warnLog } from "./config/interface.ts";
 import type { OwnerScopeLike, SettingsServiceLike } from "./config/interface.ts";
-import { MIGRATED_BAK_NAME, migrateFileConfig, resolvePluginDir } from "./migrate/interface.ts";
+import {
+  MIGRATED_BAK_NAME,
+  migrateFileConfig,
+  migrateLegacySettings,
+  resolvePluginDir,
+} from "./migrate/interface.ts";
 import { ROUTES, buildCaCertRoutes, buildConfigRoutes } from "./config/interface.ts";
 import type { CaCertRouteDeps, ConfigRouteDeps } from "./config/interface.ts";
 // host trust 域（#856）：非回环页面的 ownsHost 自条件注入
@@ -324,7 +329,7 @@ export function apply(ctx: Context, config: LanProxyConfig = {}): void {
         // 横幅每次监听结果变化都带此行，保持可感知。
         if (value.injectToken) {
           lines.push(
-            "injectToken: ON — 局域网设备免 token 直接进入（等效信任整个 LAN，关闭见 设置 → 插件 → dsh-lan-proxy）",
+            "injectToken: ON — 局域网设备免 token 直接进入（等效信任整个 LAN，关闭见 插件管理器 → dsh-lan-proxy → 行详情）",
           );
         }
         // ownsHostCompat 状态（issue #856）：默认关意味着非回环页面的设置面按上游策略
@@ -333,8 +338,8 @@ export function apply(ctx: Context, config: LanProxyConfig = {}): void {
         // 讲给操作者的地方。
         lines.push(
           value.ownsHostCompat
-            ? "ownsHostCompat: ON — 已向非回环页面声明 ownsHost（伪造上游拓扑事实位；关闭见 设置 → 插件 → dsh-lan-proxy）"
-            : "ownsHostCompat: OFF — 非回环页面的设置面不可用（上游策略；需要时在 设置 → 插件 → dsh-lan-proxy 开启，或直接用 ssh -L 走回环）",
+            ? "ownsHostCompat: ON — 已向非回环页面声明 ownsHost（伪造上游拓扑事实位；关闭见 插件管理器 → dsh-lan-proxy → 行详情）"
+            : "ownsHostCompat: OFF — 非回环页面的设置面不可用（上游策略；需要时在 插件管理器 → dsh-lan-proxy → 行详情 开启，或直接编辑 settings.yaml，或改用 ssh -L 走回环）",
         );
         const banner = lines.map((line) => `  ${line}`).join("\n");
         if (value.printBanner !== false && banner !== lastBanner) {
@@ -347,7 +352,7 @@ export function apply(ctx: Context, config: LanProxyConfig = {}): void {
         out.error(`listen failed: ${msg}`);
         if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
           out.error(
-            "hint: 端口被占用——可能另一个 dsh 实例已启动；改端口请到 设置 → 插件 → dsh-lan-proxy",
+            "hint: 端口被占用——可能另一个 dsh 实例已启动；改端口请到 插件管理器 → dsh-lan-proxy → 行详情",
           );
         }
         // 绑定失败（如端口被占）：关闭已创建的资源并清空引用，避免残留
@@ -412,12 +417,16 @@ export function apply(ctx: Context, config: LanProxyConfig = {}): void {
   // indexTaps 随每次配置热更新无界增长）；开关在 tap 内按请求读取（见 host-trust 域）。
   registerHostTrustInjection(ctx, () => resolve().ownsHostCompat === true);
 
-  // GUI 设置卡片数据面 + 存量迁移（issue #110）：settings 命名空间 attach 后——
-  //   1. onScope 内先做存量 config.json rename-first 迁移（前置于一切 enabled
-  //      判定，禁用用户升级同样迁移）；
-  //   2. setSource 把读取来源切到 scope.get()（schema defaults → base(entry) →
-  //      user 层的官方解析顺序，无双轨合并）；
-  //   3. 热更新统一由 scope.watch 驱动 scheduleSync。
+  // GUI 设置卡片数据面 + 两类存量迁移：attach 后——
+  //   1. onScope 内先完成 config.json file migration；
+  //   2. file migration settle 后重新读取 canonical raw user，再运行 settings.yaml/imported
+  //      migration 补缺（file 写入值优先，旧 settings 只补缺失字段）；
+  //   3. setSource 把读取来源切到 scope.get()；
+  //   4. 热更新由 settings/document-updated 订阅驱动 scheduleSync
+  //      （shared 侧 onChange 仍透传，双触发经 scheduleSync 3s 防抖收敛）。
+  //   两条迁移链仍 fire-and-forget；链内 await 严格串行，onScope 本身不阻塞。
+  //   两类迁移各自记 marker 且独立降级；file 失败也不会吞掉 settings 尝试。
+  //   routes.ts 不感知迁移或 settings 接缝。
   installLanProxySettings(ctx, config ?? {}, {
     setSource: (source) => {
       current = source;
@@ -430,15 +439,75 @@ export function apply(ctx: Context, config: LanProxyConfig = {}): void {
     onScope: (scope, service) => {
       attachedService = service;
       attachedScope = scope;
-      void migrateFileConfig(configDir, scope, ctx.logger).catch((err) => {
-        warnLog(ctx, `lan-proxy: 存量 config.json 迁移异常 — ${errorMessage(err)}`);
-      });
+      // 两个迁移 step 共享同一 owner scope，但不得并发 update：先让 file migration
+      // 完成（或明确失败并完成其独立降级），再刷新 raw user 后补跑 settings。
+      void (async () => {
+        try {
+          await migrateFileConfig(configDir, scope, ctx.logger);
+        } catch (err) {
+          warnLog(ctx, `lan-proxy: 存量 config.json 迁移异常 — ${errorMessage(err)}`);
+        }
+
+        // describe 必须在 file scope.update 完成后重新执行；raw user 中的 file 值
+        // 代表当前 canonical 决定，legacy migration 只补它没有的路径。
+        let currentUser: unknown;
+        try {
+          const descriptor = service
+            .describe({ redactSecrets: true })
+            .find((entry) => entry.ns === SETTINGS_NS);
+          currentUser = descriptor?.user;
+        } catch (err) {
+          warnLog(
+            ctx,
+            `lan-proxy: 旧 settings 迁移读取 canonical user 失败 — ${errorMessage(err)}`,
+          );
+          return;
+        }
+
+        try {
+          await migrateLegacySettings({
+            configDir,
+            currentUser,
+            scope,
+            logger: ctx.logger,
+          });
+        } catch (err) {
+          warnLog(ctx, `lan-proxy: 旧 settings 迁移异常 — ${errorMessage(err)}`);
+        }
+      })();
+      // 热更新显式订阅 settings/document-updated；无 on 面即跳过（shared onChange 兜底），
+      // 双触发经 scheduleSync 防抖收敛。
+      try {
+        const ctxOn = (
+          ctx as unknown as {
+            on?: (event: string, listener: (ns: unknown) => void) => () => void;
+          }
+        ).on;
+        if (typeof ctxOn === "function") {
+          const off = (
+            ctx as unknown as {
+              on: (event: string, listener: (ns: unknown) => void) => () => void;
+            }
+          ).on("settings/document-updated", (ns: unknown) => {
+            if (String(ns) !== SETTINGS_NS) return;
+            const fiber = (ctx as unknown as { fiber?: { state?: unknown } }).fiber;
+            const state =
+              fiber !== undefined && typeof fiber === "object" ? fiber.state : undefined;
+            if (state === "unloading" || state === "unloaded" || state === "disposed") return;
+            scheduleSync();
+          });
+          if (typeof off === "function")
+            ctx.effect(() => off, "lan-proxy: settings document-updated");
+        }
+      } catch {
+        // 订阅失败不阻断迁移与路由（onChange 仍兜底热更新）。
+      }
     },
   });
 
-  // 配置路由依赖装配：user 层读 describe({redactSecrets:true}) 的 descriptor
-  // （raw user section 存在即「用户设过值」，revision 供乐观并发）；写走 owner
-  // scope.update/replace（validate + per-ns 序列化写队列由官方服务承担）。
+  // 配置路由依赖装配：user 层读 describe({redactSecrets:true}) 的 descriptor 投影
+  // （raw user section 存在即「用户设过值」，revision 供乐观并发；ns 按条目 id 匹配）；
+  // 写优先走 owner scope.update/replace，scope 缺失时回落服务级 update/replace(ns, …)。
   const configDeps: ConfigRouteDeps = {
     resolve,
     readUser: () => {
@@ -460,13 +529,19 @@ export function apply(ctx: Context, config: LanProxyConfig = {}): void {
     writable: () => attachedService !== undefined,
     update: (patch, expectedRevision) => {
       const scope = attachedScope;
-      if (!scope) return Promise.reject(new Error("settings service unavailable"));
-      return scope.update(patch, expectedRevision);
+      if (scope) return scope.update(patch, expectedRevision);
+      const service = attachedService;
+      if (service && typeof service.update === "function")
+        return service.update(SETTINGS_NS, patch, expectedRevision);
+      return Promise.reject(new Error("settings service unavailable"));
     },
     replace: (section, expectedRevision) => {
       const scope = attachedScope;
-      if (!scope) return Promise.reject(new Error("settings service unavailable"));
-      return scope.replace(section, expectedRevision);
+      if (scope) return scope.replace(section, expectedRevision);
+      const service = attachedService;
+      if (service && typeof service.replace === "function")
+        return service.replace(SETTINGS_NS, section, expectedRevision);
+      return Promise.reject(new Error("settings service unavailable"));
     },
     compress: compressSnapshot,
     // 写入异常原文只进终端日志（P2-2），响应 details 用固定文案。

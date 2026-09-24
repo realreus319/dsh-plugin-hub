@@ -67,11 +67,13 @@ export interface DecideDeps {
   readonly resolveKey: KeyResolver;
   readonly recordEvent?: EventRecorder;
   /** 并发门（组合根按 maxConcurrency 创建信号量后传入；缺席即直行）。 */
-  readonly limit?: <T>(task: () => Promise<T>) => Promise<T>;
+  readonly limit?: <T>(task: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
   readonly fetchImpl?: FetchImpl;
   readonly root: string;
   readonly sessionId: string;
   readonly now?: () => number;
+  /** 调用方取消信号（ToolRunContext.signal 经 depsFor 透传）。 */
+  readonly signal: AbortSignal;
 }
 
 /** 校验后问题（文本已做 255 长度校验，id 已做 ASCII 校验；score 可带 2-10 levels，缺省即默认五档）。 */

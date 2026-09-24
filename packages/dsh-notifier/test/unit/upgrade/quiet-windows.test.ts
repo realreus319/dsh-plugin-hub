@@ -130,7 +130,6 @@ describe("链级：刻度停在 0.2.5 的装机跑完这一步", () => {
       describe: () => {
         return [] as unknown as ReturnType<UpgradeDeps["legacySettings"]["describe"]>;
       },
-      documentPath: undefined,
     };
     const deps: UpgradeDeps = { logger: makeLogger(), legacySettings: face };
 

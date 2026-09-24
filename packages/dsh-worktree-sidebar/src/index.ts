@@ -9,6 +9,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { WebRoute } from "@deepseek-ai/dsh-host-webserver";
 import type {} from "@deepseek-ai/dsh-typert-protocol";
 import { ROUTES } from "./shared/interface.ts";
+import type { HostAgentLike } from "./server/host/agents.ts";
 import { bindAgents } from "./server/host/agents.ts";
 import type { StoredSessionsFace } from "./server/host/sessions.ts";
 import { bindSessions } from "./server/host/sessions.ts";
@@ -60,7 +61,12 @@ export async function apply(ctx: Context, config: WorktreeSidebarConfig = {}): P
     logger: ctx.logger,
     register: (route) => ctx.webServer.register(route),
     agents: bindAgents({
-      on: (event, handler) => ctx.on(event, handler),
+      // 0.1.7-rc.1 serial 会等待 listener：完整等待 tools 域的注册链，再让 agent 创建继续。
+      on: (event, handler) =>
+        ctx.on(event, async (payload) => {
+          await handler({ agent: payload.agent as HostAgentLike });
+          return undefined;
+        }),
       all: () => ctx.agents.list(),
     }),
     typert: bindTypert(ctx.typert.lookups),

@@ -508,12 +508,12 @@ test("量级: README 配置表缺键 → warn 不红（pass 仍 true）", () => 
 
 test("UI 豁免表: 锚点指向错误的行 → 红并点名键（#826 新增判据的负向 fixture）", () => {
   assertRed(
-    "把 host 的锚点指到 Config 声明行（98）而不是定义行（102）",
+    "把 host 的锚点指到 Config 注释行（101）而不是定义行（102）",
     (root) => {
       editData(root, "dsh-lan-proxy-ui-exempt.json", (s) => {
         const after = s
           .split("server/config/impl/model.ts:102")
-          .join("server/config/impl/model.ts:98");
+          .join("server/config/impl/model.ts:101");
         assert.notEqual(after, s, "fixture 应含 model.ts:102");
         return after;
       });
@@ -555,11 +555,11 @@ test("UI 豁免表: 锚点写法变体（./ 前缀 / 区间）仍应通过——
       // 区间把上方注释一起括进来，也是人写锚点的自然形态。
       host.reason = host.reason.replace(
         "packages/dsh-lan-proxy/src/server/config/impl/model.ts:102",
-        "./packages/dsh-lan-proxy/src/server/config/impl/model.ts:99-106",
+        "./packages/dsh-lan-proxy/src/server/config/impl/model.ts:99-105",
       );
       host.rationale = host.rationale.replace(
         "server/config/impl/model.ts:102",
-        "./server/config/impl/model.ts:99-106",
+        "./server/config/impl/model.ts:99-105",
       );
       targetHost.reason = targetHost.reason.replace(
         "packages/dsh-lan-proxy/src/server/config/impl/model.ts:124",

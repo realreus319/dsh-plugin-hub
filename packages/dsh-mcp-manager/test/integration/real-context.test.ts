@@ -275,6 +275,37 @@ describe("组合根：宿主上下文只到组合根", () => {
     expect(seen).toEqual(["itest-agent"]);
   });
 
+  it("events.onAgentCreated 转发同步返回 undefined", () => {
+    // 0.1.7-rc.1 serial 要求监听返回 `undefined | Promise<undefined>`；转发 handler
+    // 保持同步，并显式返回 undefined。本用例钉住 handler 同步调用及监听返回值。
+    let captured:
+      ((payload: { agent: { id: string; ctx: { tools: unknown } } }) => unknown) | undefined;
+    const fakeCtx = {
+      logger: { warn: () => {}, exporter: () => () => {} },
+      webServer: { register: () => () => {} },
+      tools: { register: () => () => {}, schemas: () => [] },
+      on: (_event: string, listener: never) => {
+        captured = listener as never;
+        return () => {};
+      },
+      systemPrompt: { section: () => {} },
+      provide: () => () => {},
+      effect: () => () => {},
+      plugin: () => ({ await: () => Promise.resolve(), dispose: () => Promise.resolve() }),
+      get: () => undefined,
+    } as unknown as Parameters<typeof bindHost>[0];
+    const faces = bindHost(fakeCtx);
+    const seen: string[] = [];
+    faces.events.onAgentCreated((agent) => {
+      seen.push(agent.id);
+    });
+    const ret = (captured as unknown as (payload: unknown) => unknown)({
+      agent: { id: "a1", ctx: { tools: { t: 1 } } },
+    });
+    expect(seen).toEqual(["a1"]);
+    expect(ret).toBeUndefined();
+  });
+
   it("logs.capture 收到宿主 logger 的记录，摘除之后不再收到", async () => {
     const { fiber } = await mount([]);
     const faces = bindHost(fiber.ctx);

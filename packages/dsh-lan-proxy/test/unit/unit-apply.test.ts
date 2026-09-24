@@ -5,8 +5,8 @@
  * - prepareTls：apply(httpsEnabled: true) → sync() → prepareTls
  * - setSource / onScope：installLanProxySettings 的 hooks 回调
  * - migrateFileConfig / applyConfigPatch：迁移与保存通道边界
- * - isUnloading（包内复刻）：scope.watch 回调内调用
- * - warnLog：settings 服务缺少 register 时调用
+ * - isUnloading（包内复刻）：订阅回调内调用
+ * - warnLog：settings 服务缺席时调用
  *
  * 迁移说明（#722 阶段 1）：脚本式断言迁为 vitest 结构化用例——原每个主题块一个
  * describe、原每条 assert 一个 it，断言表达式与判定口径逐条保留（循环体经 it.each
@@ -14,8 +14,8 @@
  * 动作序列 + 在每个原断言位置取观测快照」，afterAll 回收句柄与临时目录；每个 it 只对
  * 快照断言，故交错序列里各断言看到的仍是各自当时的观测值而非块尾状态。
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createServer } from "node:http";
@@ -40,6 +40,7 @@ import {
   buildConfigRoutes,
 } from "../../src/server/config/impl/routes.ts";
 import { MIGRATED_BAK_NAME, migrateFileConfig } from "../../src/server/migrate/impl/file/index.ts";
+import { SETTINGS_MIGRATION_MARKER_NAME } from "../../src/server/migrate/impl/legacy-settings/index.ts";
 import type { Context } from "@deepseek-ai/cordis";
 import type { WebRoute } from "@deepseek-ai/dsh-host-webserver";
 import type { IncomingMessage } from "node:http";
@@ -483,10 +484,11 @@ describe("applyConfigPatch tls 成对形态（P2-1）", () => {
   });
 });
 
-// ===== apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/isUnloading/warn） =====
+// ===== apply 集成：TLS 准备 + settings 条目（setSource/onScope/isUnloading/warn） =====
 // 构造 fake ctx 使 installLanProxySettings 的 inject(["settings"]) 成功：
-// settings.register 返回 owner scope（get/watch/update/replace），触发 setSource
-// 与 onScope 回调；scope.watch 触发 isUnloading(ctx) 调用。
+// describe 按 ns 投影 value，触发 setSource 与 onScope 回调；热更新经
+// ctx.on("settings/document-updated") 订阅（fake 经 docUpdatedListeners 收集），
+// 订阅回调触发 isUnloading(ctx) 调用。
 describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/isUnloading/warn）", () => {
   let healthRouteFound = false;
   let configRouteFound = false;
@@ -499,6 +501,7 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
   let hostTrustRows = 0;
   let hpOwnsHostCompat = false;
   let hp2OwnsHostCompat = false;
+  let docUpdatedSubscribed = false;
 
   beforeAll(async () => {
     const applyHome = mkdtempSync(join(tmpdir(), "dsh-lan-proxy-apply-tls-"));
@@ -507,7 +510,8 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
     const routes: WebRoute[] = [];
     const rpcHandles: Array<{ channel: string; h: unknown; opts: unknown }> = [];
     const disposers: Array<unknown> = [];
-    const scopeWatchCbs: Array<() => void> = [];
+    // 0.1.7-rc.1 热更新面：document-updated 订阅收集器（接缝经 ctx.on 兜底订阅）。
+    const docUpdatedListeners: Array<(ns: unknown) => void> = [];
 
     const scope = {
       _val: {
@@ -526,19 +530,19 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
       async replace(section: Record<string, unknown>) {
         this._val = { ...(section as Record<string, unknown>) } as typeof this._val;
       },
-      watch(cb: () => void) {
-        scopeWatchCbs.push(cb);
-        // 立即触发一次，使 isUnloading(ctx) 被调用
-        cb();
-        return () => {};
-      },
     };
+    // 服务级 fake：describe 读面 + update/replace(ns, …) 写面（寻址语义断言用）。
     const settingsService = {
-      register(_ns: string, _schema: unknown, _opts: unknown) {
-        return scope;
-      },
       describe() {
-        return [{ ns: SETTINGS_NS, user: {}, revision: 1 }];
+        return [{ ns: SETTINGS_NS, value: scope._val, user: {}, revision: 1 }];
+      },
+      async update(ns: string, patch: Record<string, unknown>) {
+        if (ns !== SETTINGS_NS) throw new Error(`unexpected ns ${ns}`);
+        await scope.update(patch);
+      },
+      async replace(ns: string, section: Record<string, unknown>) {
+        if (ns !== SETTINGS_NS) throw new Error(`unexpected ns ${ns}`);
+        await scope.replace(section);
       },
     };
 
@@ -550,6 +554,12 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
     const ctx = {
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       webServer: ws,
+      // 0.1.7-rc.1 热更新订阅面：apply 经 ctx.on 订阅 settings/document-updated。
+      // 无 on 面即跳过（能力检测），此处提供以锁定新订阅路径。
+      on(event: string, listener: (ns: unknown) => void) {
+        if (event === "settings/document-updated") docUpdatedListeners.push(listener);
+        return () => {};
+      },
       inject(services: string[], fn: (ctx: unknown) => void) {
         if (services.includes("connection")) {
           const connectionCtx = {
@@ -610,6 +620,8 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
     healthRouteFound = Boolean(healthRoute);
     configRouteFound = Boolean(routes.find((r: WebRoute) => r.path === ROUTES.config));
     rpcHandleCount = rpcHandles.length;
+    // 新面锁定：document-updated 已订阅（热更新唯一驱动）。
+    docUpdatedSubscribed = docUpdatedListeners.length >= 1;
 
     // 触发 setSource 后调用 health handler → resolve() → current 已切到 scope.get()
     let healthBody = "";
@@ -656,7 +668,7 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
     hp2WsCompressPaths = hp2.wsCompressPaths;
     hp2OwnsHostCompat = hp2.ownsHostCompat;
 
-    // 执行 lifecycle 清理：触发 scope.watch 的 disposer 与 isUnloading
+    // 执行 lifecycle 清理：触发订阅退订与 isUnloading
     for (const d of [...disposers].reverse()) {
       try {
         (d as unknown as () => void)();
@@ -708,6 +720,10 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
     expect(hp2WsCompressPaths).toEqual(["/api/custom/ws", "/api/events.mux"]);
   });
 
+  it("document-updated 已订阅（热更新面）", () => {
+    expect(docUpdatedSubscribed).toBe(true);
+  });
+
   // 原脚本此处为 assert.ok(true, ...) 的块尾标记（真正的失败面在清理执行本身）；
   // 保留同名用例，判定绑定到「清理确实跑完」。
   it("lifecycle 清理不抛错（setSource/isUnloading/warn 路径已覆盖）", () => {
@@ -715,8 +731,85 @@ describe("apply 集成：TLS 准备 + settings 命名空间（setSource/onScope/
   });
 });
 
-// ===== apply：settings 服务缺少 register → warn 路径 =====
-describe("apply：settings 服务缺少 register → warn 路径", () => {
+// ===== 接缝面锁定：条目 id + volatile + descriptor 投影与客户端配对 =====
+// 本块只断言接缝面，不碰业务行为（转发/压缩/Host/卡片展示）。
+describe("接缝面锁定", () => {
+  it("SETTINGS_NS 为 profile 条目 id（与 patch 挂载行一致）", () => {
+    expect(SETTINGS_NS).toBe("ui-dsh-lan-proxy");
+  });
+
+  it("Config 标记 volatile（直接置 meta）", () => {
+    const meta = (Config as unknown as { meta?: { volatile?: unknown } }).meta;
+    expect(meta?.volatile).toBe(true);
+  });
+
+  it("descriptor 投影忽略增补字段（value/base/secrets 不影响 user/revision）", () => {
+    const descriptor = {
+      ns: SETTINGS_NS,
+      user: { port: 4100 },
+      revision: 42,
+      value: { port: 4100 },
+      base: {},
+      secrets: [],
+    };
+    const found = [descriptor].find((d) => d.ns === SETTINGS_NS);
+    expect(found?.user).toEqual({ port: 4100 });
+    expect(found?.revision).toBe(42);
+  });
+
+  it("服务级写面按条目 id 寻址（错 ns 拒绝）", async () => {
+    const calls: Array<{ ns: string; patch: unknown }> = [];
+    const service = {
+      async update(ns: string, patch: object) {
+        if (ns !== SETTINGS_NS) throw new Error(`unexpected ns ${ns}`);
+        calls.push({ ns, patch });
+      },
+    };
+    await service.update(SETTINGS_NS, { port: 1 });
+    expect(calls).toEqual([{ ns: "ui-dsh-lan-proxy", patch: { port: 1 } }]);
+    await expect(service.update("dsh-lan-proxy", { port: 1 })).rejects.toThrow();
+  });
+});
+
+// ===== 用户可见入口路径 =====
+const PLUGIN_MANAGER_ROW_DETAIL = "插件管理器 → dsh-lan-proxy → 行详情";
+const LEGACY_PLUGIN_PATH = "设置 → 插件 → dsh-lan-proxy";
+
+describe("用户可见入口路径（server banner 与维护者说明）", () => {
+  it("banner 提示统一指向 Plugin Manager 的 dsh-lan-proxy 行详情", () => {
+    const source = readFileSync(new URL("../../src/server/apply.ts", import.meta.url), "utf8");
+    expect(source).toContain(
+      "injectToken: ON — 局域网设备免 token 直接进入（等效信任整个 LAN，关闭见 " +
+        PLUGIN_MANAGER_ROW_DETAIL +
+        "）",
+    );
+    expect(source).toContain(
+      "ownsHostCompat: ON — 已向非回环页面声明 ownsHost（伪造上游拓扑事实位；关闭见 " +
+        PLUGIN_MANAGER_ROW_DETAIL +
+        "）",
+    );
+    expect(source).toContain(
+      "ownsHostCompat: OFF — 非回环页面的设置面不可用（上游策略；需要时在 " +
+        PLUGIN_MANAGER_ROW_DETAIL +
+        " 开启，或直接编辑 settings.yaml，或改用 ssh -L 走回环）",
+    );
+    expect(source).toContain(
+      "hint: 端口被占用——可能另一个 dsh 实例已启动；改端口请到 " + PLUGIN_MANAGER_ROW_DETAIL,
+    );
+    expect(source).not.toContain(LEGACY_PLUGIN_PATH);
+  });
+
+  it("维护者入口说明指向同一行详情路径", () => {
+    const source = readFileSync(new URL("../../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain(
+      "1. GUI 设置卡片（" + PLUGIN_MANAGER_ROW_DETAIL + "）：经 loopback HTTP 配置路由",
+    );
+    expect(source).not.toContain(LEGACY_PLUGIN_PATH);
+  });
+});
+
+// ===== apply：settings 服务缺席 → warn 路径 =====
+describe("apply：settings 服务缺席 → warn 路径", () => {
   let warnPathCompleted = false;
 
   beforeAll(async () => {
@@ -729,7 +822,7 @@ describe("apply：settings 服务缺少 register → warn 路径", () => {
       webServer: makeFakeWebServer(),
       inject(services: string[], fn: (ctx: unknown) => void) {
         if (services.includes("settings")) {
-          // settings 存在但缺少 register → warn 被调用
+          // settings 存在但无 describe（服务缺席）→ warn 被调用
           fn({
             settings: { noRegister: true },
             effect(fn2: () => unknown) {
@@ -1271,7 +1364,7 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
       expect(logger.messages).toEqual(["settings unavailable"]);
     });
 
-    it("settings 缺少 register 时告警且仍注册 health 路由", () => {
+    it("settings 服务缺席时告警且仍注册 health 路由", () => {
       const messages: string[] = [];
       const ctx = makeCtx({
         logger: {
@@ -1293,7 +1386,7 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
           port: 0,
         });
         expect(messages).toEqual([
-          "dsh-lan-proxy: settings 服务缺少 register 能力 — 设置命名空间未注册，卡片降级",
+          `${SETTINGS_NS}: settings 服务缺席 — 设置命名空间未注册，卡片降级`,
         ]);
         expect(ctx._routes.filter((r) => r.path === ROUTES.health).length).toBe(1);
       } finally {
@@ -1302,7 +1395,7 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
     });
   });
 
-  // ---- B. installLanProxySettings 全分支（inject 缺失/服务缺 register/register 抛错/detach 回落/watch 触发/isUnloading 门控）----
+  // ---- B. installLanProxySettings 全分支（inject 缺失/服务缺席/detach 回落/订阅触发/isUnloading 门控）----
   describe("B. installLanProxySettings 全分支", () => {
     // B1: ctx.inject 缺失 → 降级不抛（原脚本此分支无断言，保留其执行）。
     beforeAll(() => {
@@ -1313,19 +1406,11 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
       });
     }, 30000);
 
-    // B2: settings 服务存在但无 register → 降级；register 抛错 → 降级。
+    // B2: settings 服务缺席（缺失/无 describe）→ 降级。
     describe("B2: settings 服务异常态", () => {
       const services = [
         { label: "missing", service: undefined },
-        { label: "no-register", service: {} },
-        {
-          label: "throws",
-          service: {
-            register() {
-              throw new Error("dup");
-            },
-          },
-        },
+        { label: "no-describe", service: {} },
       ];
       const results: boolean[] = [];
 
@@ -1361,36 +1446,13 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
       });
     });
 
-    // B3: attach → watch 挂接 → 非 unloading 态触发 cb 不抛；unloading 态执行 disposers 门控跳过。
-    describe("B3: attach → watch 挂接 → isUnloading 门控", () => {
-      const makeScope = () => {
-        const st: { watchCbs: Array<() => void>; disposed: boolean } = {
-          watchCbs: [],
-          disposed: false,
-        };
-        return {
-          st,
-          scope: {
-            get() {
-              return { port: 4321 };
-            },
-            watch(cb: () => void) {
-              st.watchCbs.push(cb);
-              return () => {
-                st.disposed = true;
-              };
-            },
-            async update() {},
-            async replace() {},
-          },
-        };
-      };
-      let nsSeen: unknown;
-      let watchCbsLen = 0;
+    // B3: attach → document-updated 订阅挂接 → 非 unloading 态触发不抛；unloading 态执行 disposers 门控跳过。
+    describe("B3: attach → 订阅挂接 → isUnloading 门控", () => {
+      const listeners: Array<(ns: unknown, revision: unknown) => void> = [];
+      let subscribedCount = 0;
       let gateCompleted = false;
 
       beforeAll(() => {
-        const s = makeScope();
         const fiberStates: string[] = [];
         const ctx = makeCtx({
           get fiber() {
@@ -1400,14 +1462,17 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
             if (services.includes("settings")) {
               fn({
                 settings: {
-                  register(ns: string) {
-                    nsSeen = ns;
-                    return s.scope;
+                  describe() {
+                    return [{ ns: SETTINGS_NS, value: { port: 4321 }, revision: 0 }];
                   },
                 },
                 effect(fn2: () => unknown) {
                   const d = fn2();
                   return d;
+                },
+                on(event: string, cb: (ns: unknown, revision: unknown) => void) {
+                  if (event === "settings/document-updated") listeners.push(cb);
+                  return () => {};
                 },
               });
             }
@@ -1419,21 +1484,18 @@ describe("变异加固块（round=3 CI 回归：迁移重放/路由面/校验分
           httpsEnabled: false,
           printBanner: false,
         });
-        watchCbsLen = s.st.watchCbs.length;
+        subscribedCount = listeners.length;
         fiberStates.push("attached");
-        s.st.watchCbs[0]();
+        // 同值重放：快照比对等价，直接返回（不断言次数，只走门控路径）。
+        for (const cb of [...listeners]) cb("other-ns", 99);
         fiberStates.push("unloading");
         (ctx as unknown as Record<symbol, () => void>)[Symbol.for("dispose")]();
         fiberStates.pop();
         gateCompleted = true;
       }, 30000);
 
-      it("命名空间名", () => {
-        expect(nsSeen).toBe(SETTINGS_NS);
-      });
-
-      it("scope.watch 已挂接", () => {
-        expect(watchCbsLen >= 1).toBe(true);
+      it("document-updated 已订阅", () => {
+        expect(subscribedCount >= 1).toBe(true);
       });
 
       it("isUnloading 门控路径执行不抛错", () => {
@@ -2427,32 +2489,7 @@ describe("apply 内 readUser 真实闭包（CRAP 覆盖）", () => {
     process.env.DSH_HOME = home;
     const routes: WebRoute[] = [];
     const disposers: Array<unknown> = [];
-    const scope = {
-      _val: {
-        port: 0,
-        httpsPort: 0,
-        httpsEnabled: false,
-        wsCompressEnabled: false,
-        httpCompressEnabled: false,
-      },
-      get() {
-        return this._val;
-      },
-      async update(patch: Record<string, unknown>) {
-        Object.assign(this._val, patch);
-      },
-      async replace(section: Record<string, unknown>) {
-        this._val = { ...(section as Record<string, unknown>) } as typeof this._val;
-      },
-      watch(cb: () => void) {
-        cb();
-        return () => {};
-      },
-    };
     const settingsService = {
-      register() {
-        return scope;
-      },
       describe() {
         return [{ ns: SETTINGS_NS, user: { port: 4100 }, revision: 42 }];
       },
@@ -2533,5 +2570,412 @@ describe("apply 内 readUser 真实闭包（CRAP 覆盖）", () => {
 
   it("writable 为 true（attach 成功）", () => {
     expect(snapWritable).toBe(true);
+  });
+});
+
+// ===== Phase 2D：apply 接入旧 settings 迁移（独立 marker / raw user / 可重试） =====
+describe("apply 接入 legacy settings migration", () => {
+  type UpdateCall = { ns: string; patch: Record<string, unknown> };
+  type MountOptions = {
+    rawUser: unknown;
+    resolvedValue: Record<string, unknown>;
+    update: (ns: string, patch: object) => Promise<void>;
+    describeUser?: () => unknown;
+  };
+
+  let previousHome: string | undefined;
+  let roots: string[] = [];
+  let mounted: Array<{ dispose: () => void }> = [];
+
+  beforeEach(() => {
+    previousHome = process.env.DSH_HOME;
+    roots = [];
+    mounted = [];
+  });
+
+  afterEach(() => {
+    for (const item of [...mounted].reverse()) item.dispose();
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  });
+
+  function tempHome(): string {
+    const root = mkdtempSync(join(tmpdir(), "dsh-lan-proxy-apply-legacy-settings-"));
+    roots.push(root);
+    process.env.DSH_HOME = root;
+    return root;
+  }
+
+  async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+    const deadline = Date.now() + 2000;
+    while (!predicate()) {
+      if (Date.now() >= deadline) throw new Error(message);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
+  function mountApply(options: MountOptions): {
+    returnValue: unknown;
+    warnings: string[];
+    describeCalls: Array<{ redactSecrets?: boolean } | undefined>;
+    updates: UpdateCall[];
+    routes: WebRoute[];
+    dispose: () => void;
+  } {
+    const warnings: string[] = [];
+    const describeCalls: Array<{ redactSecrets?: boolean } | undefined> = [];
+    const updates: UpdateCall[] = [];
+    const routes: WebRoute[] = [];
+    const disposers: Array<() => void> = [];
+    let disposed = false;
+    const settings = {
+      describe(query?: { redactSecrets?: boolean }) {
+        describeCalls.push(query);
+        return [
+          {
+            ns: SETTINGS_NS,
+            value: options.resolvedValue,
+            user: options.describeUser?.() ?? options.rawUser,
+            revision: 7,
+          },
+        ];
+      },
+      async update(ns: string, patch: object): Promise<void> {
+        updates.push({ ns, patch: patch as Record<string, unknown> });
+        await options.update(ns, patch);
+      },
+    };
+    const ws = makeFakeWebServer({
+      register: (route) => {
+        routes.push(route);
+      },
+    });
+    const ctx = {
+      logger: {
+        info: () => {},
+        warn: (message: unknown) => {
+          warnings.push(String(message));
+        },
+        error: () => {},
+      },
+      webServer: ws,
+      inject(services: string[], callback: (scoped: unknown) => void) {
+        if (!services.includes("settings")) return;
+        callback({
+          settings,
+          effect(run: () => unknown) {
+            const disposer = run();
+            if (typeof disposer === "function") disposers.push(disposer as () => void);
+            return disposer;
+          },
+        });
+      },
+      effect(run: () => unknown) {
+        const disposer = run();
+        if (typeof disposer === "function") disposers.push(disposer as () => void);
+        return disposer;
+      },
+    };
+    const returnValue = apply(ctx as unknown as Context, {
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      httpsEnabled: false,
+      printBanner: false,
+    });
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      for (const disposer of [...disposers].reverse()) {
+        try {
+          disposer();
+        } catch {}
+      }
+    };
+    mounted.push({ dispose });
+    return { returnValue, warnings, describeCalls, updates, routes, dispose };
+  }
+
+  function settingsMarker(): string {
+    return join(pluginDir(), SETTINGS_MIGRATION_MARKER_NAME);
+  }
+
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("legacy 延迟时仍先完成 file migration，刷新 raw user 后只补缺", async () => {
+    const home = tempHome();
+    writeFileSync(
+      join(home, "settings.yaml"),
+      JSON.stringify({
+        "dsh-lan-proxy": { port: 4000, enabled: false },
+      }),
+      "utf8",
+    );
+    mkdirSync(pluginDir(), { recursive: true });
+    writeFileSync(join(pluginDir(), "config.json"), JSON.stringify({ port: 4100 }), "utf8");
+    const canonical: Record<string, unknown> = {};
+    const fileCompleted = deferred();
+    const harness = mountApply({
+      rawUser: {},
+      describeUser: () => ({ ...canonical }),
+      resolvedValue: {},
+      update: async (_ns, patch) => {
+        const record = patch as Record<string, unknown>;
+        Object.assign(canonical, record);
+        if (record.port === 4000) await fileCompleted.promise;
+        if (record.port === 4100) fileCompleted.resolve();
+      },
+    });
+
+    await waitFor(() => existsSync(settingsMarker()), "两条迁移链未完成");
+
+    expect(harness.updates).toEqual([
+      { ns: SETTINGS_NS, patch: { port: 4100 } },
+      { ns: SETTINGS_NS, patch: { enabled: false } },
+    ]);
+    expect(canonical).toEqual({ port: 4100, enabled: false });
+    expect(existsSync(join(pluginDir(), MIGRATED_BAK_NAME))).toBe(true);
+  });
+
+  it("file 延迟时 legacy 不抢跑，反转延迟仍保持 file 优先", async () => {
+    const home = tempHome();
+    writeFileSync(
+      join(home, "settings.yaml"),
+      JSON.stringify({
+        "dsh-lan-proxy": { port: 4000, enabled: false },
+      }),
+      "utf8",
+    );
+    mkdirSync(pluginDir(), { recursive: true });
+    writeFileSync(join(pluginDir(), "config.json"), JSON.stringify({ port: 4100 }), "utf8");
+    const canonical: Record<string, unknown> = {};
+    const fileStarted = deferred();
+    const releaseFile = deferred();
+    let fileStartedSeen = false;
+    const harness = mountApply({
+      rawUser: {},
+      describeUser: () => ({ ...canonical }),
+      resolvedValue: {},
+      update: async (_ns, patch) => {
+        const record = patch as Record<string, unknown>;
+        Object.assign(canonical, record);
+        if (record.port === 4100) {
+          fileStartedSeen = true;
+          fileStarted.resolve();
+          await releaseFile.promise;
+        }
+      },
+    });
+
+    try {
+      await waitFor(() => fileStartedSeen, "file migration 未启动");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(harness.updates[0]?.patch).toEqual({ port: 4100 });
+      expect(harness.updates.some((call) => call.patch.port === 4000)).toBe(false);
+    } finally {
+      releaseFile.resolve();
+    }
+    await waitFor(() => existsSync(settingsMarker()), "两条迁移链未完成");
+
+    expect(harness.updates).toEqual([
+      { ns: SETTINGS_NS, patch: { port: 4100 } },
+      { ns: SETTINGS_NS, patch: { enabled: false } },
+    ]);
+    expect(canonical).toEqual({ port: 4100, enabled: false });
+  });
+
+  it("坏 settings 源只降级 settings，不阻断 file marker 与配置路由", async () => {
+    const home = tempHome();
+    writeFileSync(join(home, "settings.yaml"), "dsh-lan-proxy: [", "utf8");
+    mkdirSync(pluginDir(), { recursive: true });
+    writeFileSync(join(pluginDir(), "config.json"), JSON.stringify({ port: 4100 }), "utf8");
+    const harness = mountApply({
+      rawUser: {},
+      resolvedValue: {},
+      update: async () => {},
+    });
+
+    await waitFor(
+      () => harness.warnings.some((message) => message.includes("settings.yaml")),
+      "坏 settings 源未记录独立降级",
+    );
+    await waitFor(
+      () => existsSync(join(pluginDir(), MIGRATED_BAK_NAME)),
+      "settings 失败阻断了 file marker",
+    );
+
+    expect(harness.updates).toEqual([{ ns: SETTINGS_NS, patch: { port: 4100 } }]);
+    expect(existsSync(settingsMarker())).toBe(false);
+    expect(harness.routes.some((route) => route.path === ROUTES.health)).toBe(true);
+    expect(harness.routes.some((route) => route.path === ROUTES.config)).toBe(true);
+  });
+
+  it("file 写入失败仍独立尝试 settings，下一次 apply 独立重试 file", async () => {
+    const home = tempHome();
+    writeFileSync(
+      join(home, "settings.yaml"),
+      JSON.stringify({ "dsh-lan-proxy": { enabled: false } }),
+      "utf8",
+    );
+    mkdirSync(pluginDir(), { recursive: true });
+    writeFileSync(join(pluginDir(), "config.json"), JSON.stringify({ port: 4100 }), "utf8");
+    let fileAttempts = 0;
+    let settingsAttempts = 0;
+    const first = mountApply({
+      rawUser: {},
+      resolvedValue: { enabled: true, port: 0 },
+      update: async (_ns, patch) => {
+        const record = patch as Record<string, unknown>;
+        if (record.port === 4100) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw new Error("temporary file failure");
+        }
+        if (record.enabled === false) settingsAttempts += 1;
+      },
+    });
+
+    await waitFor(() => existsSync(settingsMarker()), "file 失败阻断了 settings migration");
+    expect(fileAttempts).toBe(1);
+    expect(settingsAttempts).toBe(1);
+    expect(first.updates).toEqual([
+      { ns: SETTINGS_NS, patch: { port: 4100 } },
+      { ns: SETTINGS_NS, patch: { enabled: false } },
+    ]);
+    expect(existsSync(join(pluginDir(), "config.json"))).toBe(true);
+    expect(existsSync(join(pluginDir(), MIGRATED_BAK_NAME))).toBe(false);
+    first.dispose();
+
+    const second = mountApply({
+      rawUser: {},
+      resolvedValue: { enabled: false, port: 0 },
+      update: async (_ns, patch) => {
+        const record = patch as Record<string, unknown>;
+        if (record.port === 4100) fileAttempts += 1;
+        if (record.enabled === false) settingsAttempts += 1;
+      },
+    });
+    await waitFor(() => fileAttempts === 2, "file migration 未在下次 apply 重试");
+
+    expect(settingsAttempts).toBe(1);
+    expect(second.updates).toEqual([{ ns: SETTINGS_NS, patch: { port: 4100 } }]);
+    expect(existsSync(join(pluginDir(), MIGRATED_BAK_NAME))).toBe(true);
+  });
+
+  it("仅有旧 settings 时，以 canonical raw user 向同一 owner scope 提交缺省字段", async () => {
+    const home = tempHome();
+    writeFileSync(
+      join(home, "settings.yaml"),
+      JSON.stringify({
+        "dsh-lan-proxy": {
+          port: 4200,
+          enabled: false,
+          printBanner: false,
+          wsCompressPaths: ["/legacy"],
+        },
+      }),
+      "utf8",
+    );
+    const harness = mountApply({
+      rawUser: { port: 4300, wsCompressPaths: [] },
+      resolvedValue: {
+        port: 9999,
+        enabled: true,
+        printBanner: true,
+        wsCompressPaths: ["/resolved-default"],
+      },
+      update: async () => {},
+    });
+
+    await waitFor(() => harness.updates.length === 1, "canonical settings update 未发生");
+    await waitFor(() => existsSync(settingsMarker()), "settings migration marker 未写入");
+
+    expect(harness.returnValue).toBeUndefined();
+    expect(harness.describeCalls).toContainEqual({ redactSecrets: true });
+    expect(harness.updates).toEqual([
+      { ns: SETTINGS_NS, patch: { enabled: false, printBanner: false } },
+    ]);
+    expect(existsSync(settingsMarker())).toBe(true);
+  });
+
+  it("没有旧 settings 源时只完成独立 config.json file marker，不写 settings marker", async () => {
+    tempHome();
+    mkdirSync(pluginDir(), { recursive: true });
+    writeFileSync(join(pluginDir(), "config.json"), JSON.stringify({ printBanner: false }), "utf8");
+    const harness = mountApply({
+      rawUser: {},
+      resolvedValue: { printBanner: true },
+      update: async () => {},
+    });
+
+    await waitFor(
+      () => harness.updates.some((call) => call.patch.printBanner === false),
+      "config.json file migration 未完成",
+    );
+
+    expect(harness.describeCalls).toContainEqual({ redactSecrets: true });
+    expect(harness.updates).toEqual([{ ns: SETTINGS_NS, patch: { printBanner: false } }]);
+    expect(existsSync(join(pluginDir(), MIGRATED_BAK_NAME))).toBe(true);
+    expect(existsSync(settingsMarker())).toBe(false);
+  });
+
+  it("settings 写入失败时 warn、保留 file migration 且下次 apply 可重试", async () => {
+    const home = tempHome();
+    writeFileSync(
+      join(home, "settings.yaml"),
+      JSON.stringify({ "dsh-lan-proxy": { enabled: false } }),
+      "utf8",
+    );
+    mkdirSync(pluginDir(), { recursive: true });
+    writeFileSync(join(pluginDir(), "config.json"), JSON.stringify({ printBanner: false }), "utf8");
+    let settingsAttempts = 0;
+    const first = mountApply({
+      rawUser: {},
+      resolvedValue: { enabled: true, printBanner: true },
+      update: async (_ns, patch) => {
+        if ("enabled" in patch) {
+          settingsAttempts += 1;
+          if (settingsAttempts === 1) throw new Error("temporary settings failure");
+        }
+      },
+    });
+
+    await waitFor(
+      () =>
+        first.warnings.some((message) => message.includes("旧 settings 写入 canonical scope 失败")),
+      "settings migration 失败未记录 warn",
+    );
+    await waitFor(
+      () => first.updates.some((call) => call.patch.printBanner === false),
+      "settings 失败阻断了 config.json file migration",
+    );
+
+    expect(existsSync(settingsMarker())).toBe(false);
+    expect(existsSync(join(pluginDir(), MIGRATED_BAK_NAME))).toBe(true);
+    expect(first.routes.some((route) => route.path === ROUTES.health)).toBe(true);
+    expect(first.routes.some((route) => route.path === ROUTES.config)).toBe(true);
+    first.dispose();
+
+    const second = mountApply({
+      rawUser: {},
+      resolvedValue: { enabled: true, printBanner: false },
+      update: async (_ns, patch) => {
+        if ("enabled" in patch) settingsAttempts += 1;
+      },
+    });
+    await waitFor(() => existsSync(settingsMarker()), "失败后的 settings migration 未重试成功");
+
+    expect(settingsAttempts).toBe(2);
+    expect(second.updates).toContainEqual({
+      ns: SETTINGS_NS,
+      patch: { enabled: false },
+    });
+    expect(existsSync(settingsMarker())).toBe(true);
   });
 });

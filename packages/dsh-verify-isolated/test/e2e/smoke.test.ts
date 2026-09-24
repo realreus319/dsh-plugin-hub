@@ -54,19 +54,20 @@
  * 动作顺序、并在**每个原断言位置取观测快照**（值而非引用），it 只对快照断言。
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
@@ -712,6 +713,21 @@ describe("6b. verify-isolated.mjs 关键契约文本锚定", () => {
     expect(script.includes("源码比构建产物新")).toBeTruthy();
   });
 
+  it("dsh 清理先 SIGTERM、等待 5s，再 SIGKILL 兜底", () => {
+    const stopDsh = script.split("async function stopDshChild() {")[1]?.split("\n}")[0] ?? "";
+    const term = stopDsh.indexOf('killDsh(dshChild, "SIGTERM")');
+    const wait = stopDsh.indexOf("waitPidExit(dshChild.pid, 5000)");
+    const kill = stopDsh.indexOf('killDsh(dshChild, "SIGKILL")');
+    expect(term).toBeGreaterThanOrEqual(0);
+    expect(wait).toBeGreaterThan(term);
+    expect(kill).toBeGreaterThan(wait);
+  });
+
+  it("settle 幂等守卫先于任何清理动作", () => {
+    const settle = script.split("async function settle() {")[1]?.split("\n}")[0] ?? "";
+    expect(settle.trimStart().startsWith("if (settling) return;\n  settling = true;")).toBe(true);
+  });
+
   // 归一化语义注释在 lib/verify-core.mjs（resolvePkgArg 归属处）
   it("脚本注释声明相对路径 git URL 陷阱", () => {
     expect(coreSrc.includes("dsh 会把非绝对路径当 git URL 解析")).toBeTruthy();
@@ -764,6 +780,11 @@ describe("6c. 子进程退出码实测（不启动 dsh / 浏览器，走 --dsh �
 
   it("--help 含脚本名", () => {
     expect(h.out.includes("verify-isolated.mjs")).toBeTruthy();
+  });
+
+  it("--help 显式锁定唯一目标 dsh 版本", () => {
+    expect(h.out).toContain("0.1.7-rc.1");
+    expect(h.out).toContain("必须显式传入 --dsh");
   });
 
   it("--dsh 不存在退出码 2（找不到 dsh 入口）", () => {
@@ -824,7 +845,7 @@ describe("6d. 回归：dsh 就绪前退出 → 契约码 1 + 可操作诊断", (
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = process.argv.slice(2);
-if (args.includes("--version")) { console.log("fake-dsh 0.0.0"); process.exit(0); }
+if (args.includes("--version")) { console.log("0.1.7-rc.1"); process.exit(0); }
 if (args[0] === "plugin" && args.includes("list")) {
   const i = args.indexOf("--profile");
   const dir = join(process.env.DSH_HOME, "profiles", args[i + 1]);
@@ -1083,9 +1104,14 @@ describe("9a. 白名单版本化 + 模式全集存在", () => {
 
   // 预置模式数组，版本化 WHITELIST_V；v2 起含 dsh 自身写面
   // .credentials.yaml / storages/**；v3 起含 settings.yaml——首启弹窗跳过会预置它，
-  // 页面改设置也由 dsh 重写。
+  // 页面改设置也由 dsh 重写；v4 起含 settings.yaml.imported（0.1.7-rc.1 导入映射重命名残留，
+  // 待真机确认实际落盘形态）。
   it("WHITELIST_V 版本化格式", () => {
     expect(whitelistV).toMatch(/^v\d+$/);
+  });
+
+  it("WHITELIST_V 已跟进到 v4（settings.yaml.imported 入白名单即 bump）", () => {
+    expect(whitelistV).toBe("v4");
   });
 
   const whitelistPatterns = [
@@ -1095,6 +1121,7 @@ describe("9a. 白名单版本化 + 模式全集存在", () => {
     "*.log",
     ".credentials.yaml",
     "settings.yaml",
+    "settings.yaml.imported",
     "browser.state",
     "browser-profile/**",
     "evidence/**",
@@ -1257,7 +1284,7 @@ import { mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import http from "node:http";
 const args = process.argv.slice(2);
-if (args.includes("--version")) { console.log("fake-dsh 0.0.0"); process.exit(0); }
+if (args.includes("--version")) { console.log("0.1.7-rc.1"); process.exit(0); }
 if (args[0] === "plugin" && args.includes("list")) {
   const i = args.indexOf("--profile");
   const dir = join(process.env.DSH_HOME, "profiles", args[i + 1]);
@@ -1708,9 +1735,10 @@ describe("9d. mkdtemp fixture 正反例", () => {
 });
 
 // ---------------------------------------------------------------- 10. 首启弹窗跳过与访问令牌
-// 10a. 须知版本提取：命中真实产物形态 / 未命中返回 null。降级而非抛错是契约——
-// dsh 改了常量形态时应当「不预置 + 浏览器兜底」，而不是伪造版本来假装跳过
-describe("10a. 须知版本提取", () => {
+// 10a. 须知版本与命名空间提取：命中真实产物形态 / 未命中返回 null。降级而非抛错是契约——
+// dsh 改了常量形态时应当「不预置 + 浏览器兜底」，而不是伪造版本来假装跳过；
+// 命名空间与版本均只从官方产物单源读取（禁硬编码第二份），正则必须锚定官方同名常量
+describe("10a. 须知版本与命名空间提取", () => {
   let onboardingExists;
   let ob;
 
@@ -1737,10 +1765,36 @@ describe("10a. 须知版本提取", () => {
   it("null 输入返回 null", () => {
     expect(ob.extractWelcomeNoticeVersion(null)).toBe(null);
   });
+
+  it("从客户端产物提取须知命名空间（0.1.7-rc.1 形态）", () => {
+    expect(
+      ob.extractWelcomeNoticeNamespace(
+        'const WELCOME_NOTICE_SETTINGS_NAMESPACE = "ui-settings-general";',
+      ),
+    ).toBe("ui-settings-general");
+  });
+
+  it("无命名空间常量返回 null（调用方不得预置旧值）", () => {
+    expect(ob.extractWelcomeNoticeNamespace("nothing here")).toBe(null);
+  });
+
+  it("命名空间 null 输入返回 null", () => {
+    expect(ob.extractWelcomeNoticeNamespace(null)).toBe(null);
+  });
+
+  it("版本正则锚定官方同名常量（改名即打红，防静默失效）", () => {
+    expect(String(ob.WELCOME_NOTICE_VERSION_RE)).toContain("WELCOME_NOTICE_VERSION");
+  });
+
+  it("命名空间正则锚定官方同名常量（改名即打红，防静默失效）", () => {
+    expect(String(ob.WELCOME_NOTICE_SETTINGS_NAMESPACE_RE)).toContain(
+      "WELCOME_NOTICE_SETTINGS_NAMESPACE",
+    );
+  });
 });
 
 // 10b. settings 文档形状 + 注入防护：settings.yaml 是 dsh 要解析的结构化文档，
-// 意外字符会改写命名空间结构而不只是一个字段值
+// 意外字符会改写命名空间结构而不只是一个字段值；命名空间只能由调用方显式传入。
 describe("10b. settings 文档形状 + 注入防护", () => {
   let ob;
 
@@ -1748,14 +1802,24 @@ describe("10b. settings 文档形状 + 注入防护", () => {
     ob = await import(pathToFileURL(join(SCRIPTS_DIR, "lib", "onboarding.mjs")).href);
   });
 
-  it("settings 文档形状", () => {
-    expect(ob.welcomeSettingsDocument("2026-08-13.1")).toBe(
-      "ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n",
+  it("目标 namespace+version 构造合法 settings 文档", () => {
+    expect(ob.welcomeSettingsDocument("2026-08-13.1", "ui-settings-general")).toBe(
+      "ui-settings-general:\n  welcomeNoticeVersion: 2026-08-13.1\n",
     );
   });
 
+  it("缺 namespace 拒绝构造（不得使用旧命名空间）", () => {
+    expect(() => ob.welcomeSettingsDocument("2026-08-13.1")).toThrow(/命名空间/);
+  });
+
   it("版本含换行被拒绝", () => {
-    expect(() => ob.welcomeSettingsDocument("bad\nvalue")).toThrow(/意外字符/);
+    expect(() => ob.welcomeSettingsDocument("bad\nvalue", "ui-settings-general")).toThrow(
+      /意外字符/,
+    );
+  });
+
+  it("命名空间含换行被拒绝", () => {
+    expect(() => ob.welcomeSettingsDocument("2026-08-13.1", "bad\nns")).toThrow(/意外字符/);
   });
 });
 
@@ -1763,12 +1827,19 @@ describe("10b. settings 文档形状 + 注入防护", () => {
 describe("10c. dsh 安装根与产物定位（mkdtemp fixture 建模 npm 提升布局）", () => {
   let fix;
   let fixBare;
+  let fixMissingNamespace;
+  let fixMissingVersion;
   let dshRoot;
   let bin;
   let rootBare;
+  let rootMissingNamespace;
+  let rootMissingVersion;
   let dshRootResolved;
   let welcomeClientFile;
   let e2eVersion;
+  let e2eNamespace;
+  let missingNamespaceResult;
+  let missingVersionResult;
   let bareClientFile;
   let bareVersion;
 
@@ -1796,12 +1867,47 @@ describe("10c. dsh 安装根与产物定位（mkdtemp fixture 建模 npm 提升�
     );
     writeFileSync(
       join(clientDir, "lib", "client.js"),
-      'const WELCOME_NOTICE_VERSION = "2099-01-01.1";',
+      'const WELCOME_NOTICE_SETTINGS_NAMESPACE = "ui-settings-general";\nconst WELCOME_NOTICE_VERSION = "2099-01-01.1";',
     );
     bin = join(dshRoot, "lib", "bin.js");
     dshRootResolved = ob.dshRootOf(bin);
     welcomeClientFile = ob.welcomeClientFileOf(dshRoot);
     e2eVersion = ob.findWelcomeNoticeVersion(bin)?.version;
+    e2eNamespace = ob.findWelcomeNoticeVersion(bin)?.namespace;
+    const makeMissingFactFixture = (prefix, clientSource) => {
+      const fixture = mkdtempSync(join(tmpdir(), prefix));
+      const root = join(fixture, "node_modules", "@deepseek-ai", "dsh");
+      const client = join(root, "node_modules", "@deepseek-ai", "dsh-client-ui-settings-models");
+      mkdirSync(join(root, "lib"), { recursive: true });
+      mkdirSync(join(client, "lib"), { recursive: true });
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ name: "@deepseek-ai/dsh", version: "0.0.0" }),
+      );
+      writeFileSync(join(root, "lib", "bin.js"), "");
+      writeFileSync(
+        join(client, "package.json"),
+        JSON.stringify({ name: "@deepseek-ai/dsh-client-ui-settings-models" }),
+      );
+      writeFileSync(join(client, "lib", "client.js"), clientSource);
+      return { fixture, binPath: join(root, "lib", "bin.js") };
+    };
+
+    const missingNamespace = makeMissingFactFixture(
+      "dsh-verify-onboarding-missing-namespace-",
+      'const WELCOME_NOTICE_VERSION = "2099-01-01.1";',
+    );
+    fixMissingNamespace = missingNamespace.fixture;
+    rootMissingNamespace = missingNamespace.binPath;
+    missingNamespaceResult = ob.findWelcomeNoticeVersion(rootMissingNamespace);
+
+    const missingVersion = makeMissingFactFixture(
+      "dsh-verify-onboarding-missing-version-",
+      'const WELCOME_NOTICE_SETTINGS_NAMESPACE = "ui-settings-general";',
+    );
+    fixMissingVersion = missingVersion.fixture;
+    rootMissingVersion = missingVersion.binPath;
+    missingVersionResult = ob.findWelcomeNoticeVersion(rootMissingVersion);
 
     // 负例用独立 fixture（依赖从一开始就不存在）：删除文件会被 require.resolve
     // 的路径缓存挡住，测不出真实的「依赖缺失」路径
@@ -1819,6 +1925,8 @@ describe("10c. dsh 安装根与产物定位（mkdtemp fixture 建模 npm 提升�
   afterAll(() => {
     rmSync(fix, { recursive: true, force: true }); // 零污染纪律
     rmSync(fixBare, { recursive: true, force: true });
+    rmSync(fixMissingNamespace, { recursive: true, force: true });
+    rmSync(fixMissingVersion, { recursive: true, force: true });
   });
 
   it("dshRootOf 从入口向上解析安装根", () => {
@@ -1842,12 +1950,271 @@ describe("10c. dsh 安装根与产物定位（mkdtemp fixture 建模 npm 提升�
     expect(e2eVersion).toBe("2099-01-01.1");
   });
 
+  it("端到端解析命名空间（0.1.7-rc.1 形态）", () => {
+    expect(e2eNamespace).toBe("ui-settings-general");
+  });
+
+  it("版本与命名空间同源一致（单源读取，防下次 bump 静默失效）", () => {
+    expect(`${e2eNamespace}:\n  welcomeNoticeVersion: ${e2eVersion}\n`).toBe(
+      "ui-settings-general:\n  welcomeNoticeVersion: 2099-01-01.1\n",
+    );
+  });
+
+  it("缺命名空间常量时端到端返回 null", () => {
+    expect(missingNamespaceResult).toBe(null);
+  });
+
+  it("缺版本常量时端到端返回 null", () => {
+    expect(missingVersionResult).toBe(null);
+  });
+
   it("依赖解析失败返回 null（降级不抛）", () => {
     expect(bareClientFile).toBe(null);
   });
 
   it("产物缺失时端到端返回 null（预置失败只警告）", () => {
     expect(bareVersion).toBe(null);
+  });
+});
+
+// 10c-2. presetWelcomeNotice 调用方：缺事实必须交给 browser-driver，
+// 有效目标事实仍预置真实 settings.yaml；全程用临时目录和假 dsh，不启动真实 GUI。
+describe("10c-2. presetWelcomeNotice 严格事实与预置报告", () => {
+  let tmp;
+  let missingCase;
+  let validCase;
+  let oldVersionCase;
+  let versionReadFailureCase;
+  let omittedDshCase;
+  let wrongEntryCase;
+
+  const makeDshInstall = (
+    name: string,
+    clientSource: string,
+    versionOutput: string | null = "0.1.7-rc.1",
+    versionExitCode = 0,
+  ) => {
+    const fixture = mkdtempSync(join(tmp, name));
+    const dshRoot = join(fixture, "node_modules", "@deepseek-ai", "dsh");
+    const clientDir = join(
+      dshRoot,
+      "node_modules",
+      "@deepseek-ai",
+      "dsh-client-ui-settings-models",
+    );
+    mkdirSync(join(dshRoot, "lib"), { recursive: true });
+    mkdirSync(join(clientDir, "lib"), { recursive: true });
+    writeFileSync(
+      join(dshRoot, "package.json"),
+      JSON.stringify({ name: "@deepseek-ai/dsh", version: versionOutput ?? "unknown" }),
+    );
+    writeFileSync(
+      join(clientDir, "package.json"),
+      JSON.stringify({ name: "@deepseek-ai/dsh-client-ui-settings-models" }),
+    );
+    writeFileSync(join(clientDir, "lib", "client.js"), clientSource);
+    const bin = join(dshRoot, "lib", "bin.mjs");
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env node
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import http from "node:http";
+const args = process.argv.slice(2);
+if (args.includes("--version")) {
+  console.log(${JSON.stringify(versionOutput ?? "")});
+  process.exit(${versionExitCode});
+}
+if (args[0] === "plugin" && args.includes("list")) {
+  const i = args.indexOf("--profile");
+  const dir = join(process.env.DSH_HOME, "profiles", args[i + 1]);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ dsh: { profile: { bundles: [] } } }));
+  process.exit(0);
+}
+if (args.includes("--host")) {
+  const port = Number(args[args.indexOf("--port") + 1]);
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.end("ok");
+  });
+  server.listen(port, "127.0.0.1", () => {
+    console.log("dsh web: http://127.0.0.1:" + port + "/?token=fixture-token");
+    setTimeout(() => server.close(() => process.exit(0)), 750);
+  });
+  await new Promise(() => {});
+}
+process.exit(0);
+`,
+    );
+    chmodSync(bin, 0o755);
+    return { fixture, entry: winCmdShimFor(bin) };
+  };
+
+  const pathEntryFor = (entry: string) => {
+    const pathDir = join(dirname(entry), "path-bin");
+    mkdirSync(pathDir, { recursive: true });
+    if (process.platform === "win32") {
+      writeFileSync(
+        join(pathDir, "dsh.cmd"),
+        `@echo off\r\n"${process.execPath}" "${entry}" %*\r\n`,
+      );
+    } else {
+      symlinkSync(entry, join(pathDir, "dsh"));
+    }
+    return pathDir;
+  };
+
+  const settingsFilesUnder = (root: string) => {
+    const found = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const abs = join(dir, entry.name);
+        if (entry.isDirectory()) walk(abs);
+        else if (entry.name === "settings.yaml") found.push(abs);
+      }
+    };
+    walk(root);
+    return found;
+  };
+
+  const runCase = (entry: string | null, extraEnv: NodeJS.ProcessEnv = {}) => {
+    const runTmp = mkdtempSync(join(tmp, "runtime-"));
+    const args = [scriptFile, "--json", "--keep", "--port", "0"];
+    if (entry !== null) args.push("--dsh", entry);
+    const result = spawnSync(process.execPath, args, {
+      encoding: "utf8",
+      timeout: 30000,
+      env: {
+        ...process.env,
+        TMPDIR: runTmp,
+        TMP: runTmp,
+        TEMP: runTmp,
+        ...extraEnv,
+      },
+    });
+    const stdout = String(result.stdout ?? "");
+    const stderr = String(result.stderr ?? "");
+    const lines = stdout.trim().split("\n").filter(Boolean);
+    const verdict = JSON.parse(lines.at(-1) ?? "{}");
+    const home = verdict.dshHome ?? null;
+    const settingsPath = home ? join(home, "settings.yaml") : null;
+    return {
+      status: result.status,
+      report: stdout + stderr,
+      verdict,
+      settingsExists: settingsPath ? existsSync(settingsPath) : false,
+      settingsWrites: settingsFilesUnder(runTmp),
+      settings:
+        settingsPath && existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : null,
+    };
+  };
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), "dsh-verify-preset-e2e-"));
+    const missing = makeDshInstall(
+      "missing-namespace-",
+      'const WELCOME_NOTICE_VERSION = "2099-01-01.1";',
+    );
+    const valid = makeDshInstall(
+      "valid-",
+      'const WELCOME_NOTICE_SETTINGS_NAMESPACE = "ui-settings-general";\nconst WELCOME_NOTICE_VERSION = "2099-01-01.1";',
+    );
+    const clientSource =
+      'const WELCOME_NOTICE_SETTINGS_NAMESPACE = "ui-settings-general";\nconst WELCOME_NOTICE_VERSION = "2099-01-01.1";';
+    const oldVersion = makeDshInstall("old-version-", clientSource, "0.1.5-rc.1");
+    const versionReadFailure = makeDshInstall("version-read-failure-", clientSource, null, 9);
+    const controlledPath = pathEntryFor(valid.entry);
+
+    missingCase = runCase(missing.entry);
+    validCase = runCase(valid.entry);
+    oldVersionCase = runCase(oldVersion.entry);
+    versionReadFailureCase = runCase(versionReadFailure.entry);
+    omittedDshCase = runCase(null, {
+      PATH: [controlledPath, process.env.PATH].filter(Boolean).join(delimiter),
+    });
+    wrongEntryCase = runCase(join(tmp, "no-such-dsh-entry"));
+  }, 60_000);
+
+  afterAll(() => {
+    for (const result of [
+      missingCase,
+      validCase,
+      oldVersionCase,
+      versionReadFailureCase,
+      omittedDshCase,
+      wrongEntryCase,
+    ]) {
+      const home = result?.verdict?.dshHome;
+      if (home) rmSync(home, { recursive: true, force: true });
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("未传 --dsh 时 fail-closed，不使用 PATH 中碰巧存在的目标入口", () => {
+    expect(omittedDshCase.status).toBe(2);
+    expect(omittedDshCase.report).toContain("必须显式传入 --dsh");
+    expect(omittedDshCase.report).toContain("0.1.7-rc.1");
+  });
+
+  it("旧版本 0.1.5-rc.1 被拒绝，错误点名实际与期望版本", () => {
+    expect(oldVersionCase.status).toBe(2);
+    expect(oldVersionCase.report).toContain("实际版本: 0.1.5-rc.1");
+    expect(oldVersionCase.report).toContain("期望版本: 0.1.7-rc.1");
+  });
+
+  it("--version 读取失败被拒绝，不降级为 unknown 后继续", () => {
+    expect(versionReadFailureCase.status).toBe(2);
+    expect(versionReadFailureCase.report).toContain("实际版本: 读取失败");
+    expect(versionReadFailureCase.report).toContain("期望版本: 0.1.7-rc.1");
+    expect(versionReadFailureCase.report).not.toContain("(unknown)");
+  });
+
+  it("不存在的 --dsh 入口被拒绝，错误点名不可用与期望版本", () => {
+    expect(wrongEntryCase.status).toBe(2);
+    expect(wrongEntryCase.report).toContain("实际版本: 不可用");
+    expect(wrongEntryCase.report).toContain("期望版本: 0.1.7-rc.1");
+  });
+
+  it.each([
+    ["旧版本", () => oldVersionCase],
+    ["版本读取失败", () => versionReadFailureCase],
+    ["未传 --dsh", () => omittedDshCase],
+    ["错误入口", () => wrongEntryCase],
+  ])("%s 不产出 settings 或 preset 目标证据", (_label, getResult) => {
+    const result = getResult();
+    expect(result.verdict.dshHome).toBeUndefined();
+    expect(result.verdict.onboarding).toBeUndefined();
+    expect(result.settingsExists).toBe(false);
+    expect(result.settingsWrites).toEqual([]);
+    expect(result.report).not.toContain("source=preset");
+    expect(result.report).not.toContain('"source": "preset"');
+  });
+
+  it("缺 namespace 时 preset skip、不写 settings，报告不含旧 namespace", () => {
+    expect(missingCase.status).toBe(0);
+    expect(missingCase.verdict.onboarding).toMatchObject({
+      skip: true,
+      source: "unavailable",
+      version: null,
+      namespace: null,
+    });
+    expect(missingCase.settingsExists).toBe(false);
+    expect(missingCase.report).not.toContain("ui-onboarding");
+  });
+
+  it("目标 namespace+version 仍预置真实 settings，报告显式真实 namespace", () => {
+    expect(validCase.status).toBe(0);
+    expect(validCase.verdict.onboarding).toMatchObject({
+      skip: true,
+      source: "preset",
+      version: "2099-01-01.1",
+      namespace: "ui-settings-general",
+    });
+    expect(validCase.settings).toBe("ui-settings-general:\n  welcomeNoticeVersion: 2099-01-01.1\n");
+    expect(validCase.settingsWrites).toHaveLength(1);
+    expect(validCase.report).toContain("ui-settings-general.welcomeNoticeVersion=2099-01-01.1");
+    expect(validCase.report).not.toContain("ui-onboarding");
   });
 });
 
@@ -2078,5 +2445,37 @@ describe("10i. 文档同步（跳过与令牌指导锚点）", () => {
   const readmeEnAnchors = ["--no-skip-onboarding", "--url state", "token=***", "onboarding.mjs"];
   it.each(readmeEnAnchors)("README.en.md 含 %s", (anchor) => {
     expect(readmeEn.includes(anchor)).toBeTruthy();
+  });
+});
+
+// 10j. skill 加载 + 生产实现无版本/namespace 字面量：
+// namespace 与 version 都只能来自官方产物，源码不得重新建立第二事实源。
+describe("10j. skill 加载 + 生产实现单源回归", () => {
+  let skillRaw;
+  let onboardingSrc;
+
+  beforeAll(() => {
+    skillRaw = readFileSync(SKILL_FILE, "utf8");
+    onboardingSrc = readFileSync(join(SCRIPTS_DIR, "lib", "onboarding.mjs"), "utf8");
+  });
+
+  it("skill 主文件存在（加载回归）", () => {
+    expect(existsSync(SKILL_FILE)).toBeTruthy();
+  });
+
+  it("skill 主文件提及命名空间现取（文档与实现同源）", () => {
+    expect(skillRaw.includes("WELCOME_NOTICE_SETTINGS_NAMESPACE")).toBeTruthy();
+  });
+
+  it("生产实现不含目标 namespace 字面量", () => {
+    expect(onboardingSrc.includes('"ui-settings-general"')).toBe(false);
+  });
+
+  it("生产实现不含 legacy namespace 字面量", () => {
+    expect(onboardingSrc.includes('"ui-onboarding"')).toBe(false);
+  });
+
+  it("生产实现不含目标 version 字面量", () => {
+    expect(onboardingSrc.includes("2026-08-13.1")).toBe(false);
   });
 });

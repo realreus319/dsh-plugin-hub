@@ -9,10 +9,26 @@
 import { randomUUID } from "node:crypto";
 import type { SupervisorLite } from "../../../connection/interface.ts";
 import type { CatalogMessage } from "../injection/index.ts";
+import type { ContextFormed } from "@deepseek-ai/dsh-llm";
 import {
   DEFAULT_ANNOUNCE_CATALOG,
   DEFAULT_CATALOG_MAX_ENTRIES,
 } from "../../../shared/interface.ts";
+
+/**
+ * dsh 0.1.7-rc.1 producer-owned source kind。
+ *
+ * V4 将生产者身份编码进 kind；本包不再声明或依赖共享 `plugin` 基座，
+ * 也不把身份拆到 `plugin` 字段。snapshot 的 form/sections 由官方
+ * ContextFormed 约束。
+ */
+declare module "@deepseek-ai/dsh-llm" {
+  interface MessageSourceMap {
+    "plugin:@wingsky-1/dsh-mcp-manager": {
+      kind: "plugin:@wingsky-1/dsh-mcp-manager";
+    } & ContextFormed;
+  }
+}
 
 /** 目录条目。 */
 export interface CatalogEntry {
@@ -34,17 +50,9 @@ export type CatalogCache = Map<string, { summary: string }>;
 // 消费它们，端口注入到时尚未装配；此处只保留转出，维持 catalog 门面与入口的导出面不变。
 export { DEFAULT_ANNOUNCE_CATALOG, DEFAULT_CATALOG_MAX_ENTRIES };
 
-/**
- * 能力目录消息的来源身份（#723）：`source.kind` 只能是宿主已登记的通用值
- * `plugin`，本插件的身份由 `source.plugin` 承载。
- *
- * 为什么不再自造 `kind`：宿主 v2→v3 迁移对 surface 消息的 `source.kind` 有一份
- * 封闭白名单（`dsh-session-format-v2-to-v3` 的 `SOURCE_KINDS`），自造值会让升级前
- * 落盘的会话永久无法迁移（原件保留、每次加载同样失败）。官方上下文包
- * （`dsh-time-context` / `dsh-tmux-context`）走的就是 `plugin` + 身份 + snapshot
- * 形态，这里与之一致：形态由宿主校验，身份由本包判定。
- */
+/** 本包 V4 producer-owned source kind；身份编码在 kind，不另设 plugin 字段。 */
 export const CATALOG_SOURCE_PLUGIN = "@wingsky-1/dsh-mcp-manager";
+export const CATALOG_SOURCE_KIND = `plugin:${CATALOG_SOURCE_PLUGIN}`;
 /** 目录快照的段名（snapshot 形态下承载渲染后的目录正文）。 */
 export const CATALOG_SECTION_NAME = "mcp-catalog";
 
@@ -202,22 +210,17 @@ export function composeCatalogEntries(
 
 /** 渲染能力目录消息（source 标记供定位替换）。
  *
- * 按条目 scope 只区分「是否附项目级更严格的那条引导」（#228 双轨迁移；#767 S1-5b 收敛为
- * id 口径）：#767 笔 2 起 `mcp__*` 已不在模型可见面（笔 1b 的可见面收敛），**全部**服务器
- * ——项目级、全局级、封装定义条目（toolDefinitions）——一律经中间层工具访问。原来按 `mode`
- * 分出的「全局一律直呼 `mcp__<id>__<tool>`」分支是笔 1b 之后已假的事实，随 `mode` 一并删除；
- * 兜底引导同理（写成直呼会让模型在无 `mcp__` 可见面时无路可走）。
+ * 当前 source 精确为 V4 producer-owned snapshot：
+ * `{ kind: "plugin:@wingsky-1/dsh-mcp-manager", form: "snapshot", sections: [...] }`。
  */
 export function renderMcpCatalogMessage(entries: CatalogEntry[]): CatalogMessage {
-  const hasProject = entries.some((entry) => entry.scope === "project");
-  const projectGuidance =
-    "Project-level servers MUST be accessed via middleware tools: search with `ws_mcp_search`, verify schema with `ws_mcp_detail` if uncertain, then invoke with `ws_mcp_call` (use `ws_mcp_list` for full inventory audits). **Do NOT invoke project-level servers using mcp__ prefixed tools directly**.";
-  const globalGuidance =
-    "Global servers are also accessed via middleware: search with `ws_mcp_search`, then invoke with `ws_mcp_call` using the same `ws_mcp_*` suite (address them by full name `@global/<server>`).";
-  const guidance = hasProject ? `${projectGuidance} ${globalGuidance}` : globalGuidance;
+  // 介绍文本（用户反馈精简）：只留调用必需（全名寻址/裸工具名/detail 先验/search 顺序）；
+  // 状态声明、弹窗指引、审计括号、重试句已删；mcp__ 禁令按要求不强调（裸名规则正写保留）。
+  const guidance =
+    'Call via `ws_mcp_call` with server `"@<root>/<server>"` (`"@global/<server>"` for global ones) and the bare tool name; find tools with `ws_mcp_search`, check schema with `ws_mcp_detail` first when unsure.';
   const lines = [
     "<system-reminder>",
-    'Configured MCP servers in this session (**capability descriptions only, does not reflect active connection status**; tools register once connected via GUI "MCP" popup):',
+    "Available MCP servers (capability snapshot):",
     "",
     "<available_mcp_servers>",
     // 服务器名与描述同为远端可控输入：同口径转义后才可拼入目录正文，避免标签逃逸改写注入语义；摘要仍以原始名计算，转义不改变去重口径。
@@ -229,7 +232,6 @@ export function renderMcpCatalogMessage(entries: CatalogEntry[]): CatalogMessage
     "</available_mcp_servers>",
     "",
     guidance,
-    'If a server was available but is now disconnected, do not retry the same tool more than twice. Switch to an alternative method or ask the user to check the "MCP" popup.',
     "</system-reminder>",
   ].join("\n");
   return {
@@ -237,8 +239,7 @@ export function renderMcpCatalogMessage(entries: CatalogEntry[]): CatalogMessage
     role: "user",
     content: [{ type: "text", text: lines }],
     source: {
-      kind: "plugin",
-      plugin: CATALOG_SOURCE_PLUGIN,
+      kind: CATALOG_SOURCE_KIND,
       form: "snapshot",
       sections: [{ name: CATALOG_SECTION_NAME, text: lines }],
     },
@@ -255,14 +256,12 @@ export function escapeCatalogText(value: unknown): string {
     .replace(/[\r\n]/gu, " ");
 }
 
-/** 是否为本插件注入的能力目录消息（新旧两代 source 形态都认，#723 跨版本兼容）。 */
-export function isCatalogSource(source: { kind?: unknown; plugin?: unknown } | undefined): boolean {
-  if (source === undefined) return false;
-  if (source.kind === "mcp-catalog") return true;
-  return source.kind === "plugin" && source.plugin === CATALOG_SOURCE_PLUGIN;
+/** 是否为本插件当前 V4 注入的能力目录消息。旧 V0/V2/V3 source 不在业务域兼容。 */
+export function isCatalogSource(source: { kind?: unknown } | undefined): boolean {
+  return source?.kind === CATALOG_SOURCE_KIND;
 }
 
-/** 从消息列表里定位既有的能力目录消息（新旧两代 source 形态都认）。 */
+/** 从消息列表里定位既有的当前 V4 能力目录消息。 */
 export function findCatalogMessage(messages: CatalogMessage[]): CatalogMessage | undefined {
   for (const message of messages) {
     if (isCatalogSource(message?.source)) return message;
@@ -271,15 +270,9 @@ export function findCatalogMessage(messages: CatalogMessage[]): CatalogMessage |
 }
 
 /**
- * 取回一条目录消息所发布的条目。
- *
- * 新旧两代形态（#723）：
- * - 旧形态 `{ kind: "mcp-catalog", form: "catalog", entries }`：逐条还原条目，
- *   digest 与升级前完全一致；
- * - 新形态 `{ kind: "plugin", form: "snapshot", sections: [{ name, text }] }`：
- *   从快照正文的 `<available_mcp_servers>` 块还原条目（格式化是单射的），使
- *   digest 与 `composeCatalogEntries` 的条目 digest 同口径——否则每次启动都会
- *   误判"目录已变"而注入一条修正帧。
+ * 取回一条目录消息所发布的条目：从快照正文的 `<available_mcp_servers>` 块还原
+ * 条目（格式化是单射的），使 digest 与 `composeCatalogEntries` 的条目 digest
+ * 同口径——否则每次启动都会误判"目录已变"而注入一条修正帧。
  *
  * 坏数据返回 undefined（按"不是本插件的目录"处理）：本函数在 step 监听器里被调用，
  * 抛错会让该会话每一轮都失败。
@@ -288,29 +281,17 @@ export function resolveCatalogEntries(
   source: CatalogSourceLike | undefined,
 ): CatalogEntry[] | undefined {
   if (!isCatalogSource(source)) return undefined;
-  if (source?.kind === "plugin") {
-    const sections = source.sections;
-    if (!Array.isArray(sections)) return undefined;
-    const section = sections.find(
-      (candidate) =>
-        typeof candidate === "object" &&
-        candidate !== null &&
-        (candidate as { name?: unknown }).name === CATALOG_SECTION_NAME &&
-        typeof (candidate as { text?: unknown }).text === "string",
-    ) as { text: string } | undefined;
-    if (section === undefined) return undefined;
-    return parseCatalogBody(section.text);
-  }
-  const entries = source?.entries;
-  if (!Array.isArray(entries)) return undefined;
-  const readable: CatalogEntry[] = [];
-  for (const entry of entries) {
-    if (typeof entry !== "object" || entry === null) return undefined;
-    const { name, text } = entry as { name?: unknown; text?: unknown };
-    if (typeof name !== "string" || name === "") return undefined;
-    readable.push({ name, text: typeof text === "string" ? text : undefined });
-  }
-  return readable;
+  const sections = source?.sections;
+  if (!Array.isArray(sections)) return undefined;
+  const section = sections.find(
+    (candidate) =>
+      typeof candidate === "object" &&
+      candidate !== null &&
+      (candidate as { name?: unknown }).name === CATALOG_SECTION_NAME &&
+      typeof (candidate as { text?: unknown }).text === "string",
+  ) as { text: string } | undefined;
+  if (section === undefined) return undefined;
+  return parseCatalogBody(section.text);
 }
 
 /** 还原渲染时的反转义（escapeCatalogText 的逆；`&amp;` 最后解，避免二次解码）。 */
@@ -343,31 +324,19 @@ function parseCatalogBody(body: string): CatalogEntry[] | undefined {
 }
 
 /**
- * 防御性读取目录 source 里的条目（坏数据返回 undefined）。
- *
- * 保留旧签名与旧语义（只读已发布形态的 `entries`）：它是包导出面与既有单测的契约，
- * 新形态的读取走 {@link resolveCatalogEntries}。
+ * 防御性读取当前 V4 source 的条目；旧 `entries` 形态由 maintenance 处理，
+ * 不在业务 reader 中兼容。
  */
 export function readCatalogEntries(
-  source: { entries?: unknown } | undefined,
+  source: CatalogSourceLike | undefined,
 ): CatalogEntry[] | undefined {
-  const entries = source?.entries;
-  if (!Array.isArray(entries)) return undefined;
-  const readable: CatalogEntry[] = [];
-  for (const entry of entries) {
-    if (typeof entry !== "object" || entry === null) return undefined;
-    const { name, text } = entry;
-    if (typeof name !== "string" || name === "") return undefined;
-    readable.push({ name, text: typeof text === "string" ? text : undefined });
-  }
-  return readable;
+  return resolveCatalogEntries(source);
 }
 
-/** 目录 source 最小面（新旧两代形态；判定见 {@link isCatalogSource}）。 */
+/** 当前 V4 source 最小面。 */
 export interface CatalogSourceLike {
   kind?: unknown;
-  plugin?: unknown;
-  entries?: unknown;
+  form?: unknown;
   sections?: unknown;
 }
 
@@ -377,10 +346,18 @@ export function renderMcpCatalogUpdate(entries: CatalogEntry[]): CatalogMessage 
   const inner = body.content![0].text!.split("\n").slice(3).join("\n");
   const text = [
     "<system-reminder>",
-    "MCP server configuration has changed. **This catalog replaces all previous available_mcp_servers lists**:",
+    "MCP catalog updated; this replaces all previous available_mcp_servers lists:",
     "",
     inner,
     "</system-reminder>",
   ].join("\n");
-  return { ...body, content: [{ type: "text", text }] };
+  return {
+    ...body,
+    content: [{ type: "text", text }],
+    source: {
+      kind: CATALOG_SOURCE_KIND,
+      form: "snapshot",
+      sections: [{ name: CATALOG_SECTION_NAME, text }],
+    },
+  };
 }
