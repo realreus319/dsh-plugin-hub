@@ -108,7 +108,8 @@
             "packages/dsh-decision-gateway/test/unit/tools.test.ts",
             "packages/dsh-decision-gateway/test/unit/verdict-tiers.test.ts",
             "packages/dsh-decision-gateway/test/unit/tool-description.test.ts",
-            "packages/dsh-decision-gateway/test/unit/signal-cancel.test.ts"
+            "packages/dsh-decision-gateway/test/unit/signal-cancel.test.ts",
+            "packages/dsh-decision-gateway/test/unit/project-levels.test.ts"
           ],
           "comment": "按域分段（#943 对账后，单段 _single 按 server 目录名拆分）：tools 域全量在面内（含 interface 门面与 deps 类型面）；面文件集与单段时代一致，仅执行分片变化；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -156,7 +157,10 @@
             "packages/dsh-decision-gateway/test/client-dom/tabs-mask-history.test.ts",
             "packages/dsh-decision-gateway/test/client-unit/format.test.ts",
             "packages/dsh-decision-gateway/test/client-unit/locale-i18n.test.ts",
-            "packages/dsh-decision-gateway/test/client-unit/routes-consistency.test.ts"
+            "packages/dsh-decision-gateway/test/client-unit/routes-consistency.test.ts",
+            "packages/dsh-decision-gateway/test/client-dom/pane-helpers.test.ts",
+            "packages/dsh-decision-gateway/test/client-unit/contract-parsers.test.ts",
+            "packages/dsh-decision-gateway/test/client-unit/history-entry.test.ts"
           ],
           "comment": "React 独立 tab（含 tsx 真实行为判据）：vanilla DOM 层已删，settings/*.tsx（密钥二选一、详情单开、保存守卫、清空两步、过滤）进变异面；css.d.ts 留面内保并集棘轮不收缩；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         }
@@ -353,6 +357,7 @@
             "packages/dsh-mcp-manager/test/unit/unit-init-failure.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/unit-manager-pure.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-redaction-a1.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-routes-a2.test.ts",
@@ -381,6 +386,7 @@
             "packages/dsh-mcp-manager/test/unit/unit-erasure.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-image-admission.test.ts",
+            "packages/dsh-mcp-manager/test/unit/unit-runtime-pure.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-init-failure.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
@@ -467,6 +473,7 @@
             "packages/dsh-mcp-manager/test/unit/unit-call-stats.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-call-timeout.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-catalog.test.ts",
+            "packages/dsh-mcp-manager/test/unit/unit-catalog-pure.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-config-env-policy.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-dispatch.test.ts",
             "packages/dsh-mcp-manager/test/unit/unit-file-io-queue.test.ts",
@@ -500,6 +507,7 @@
           "excludes": [],
           "testFiles": [
             "packages/dsh-mcp-manager/test/client-unit/client-context-s2.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/client-float-pure.test.ts",
             "packages/dsh-mcp-manager/test/client-dom/panel-aria-modal.test.ts",
             "packages/dsh-mcp-manager/test/client-dom/settings-card.test.ts"
           ],
@@ -824,8 +832,10 @@
             "packages/dsh-provider-usage/test/unit/pipeline/unit-signal-lock.test.ts",
             "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
             "packages/dsh-provider-usage/test/unit/registry/unit-hotreload.test.ts",
+            "packages/dsh-provider-usage/test/unit/routes/unit-refactor-pure.test.ts",
             "packages/dsh-provider-usage/test/unit/shared/unit-chart.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts"
+            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
+            "packages/dsh-provider-usage/test/unit/adapters/unit-adapters-pure.test.ts"
           ],
           "comment": "#342 v4：src 级文件组分段（3）——contracts+server/pipeline/guards（契约面，#768 D6 随域改址）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -848,7 +858,8 @@
             "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
             "packages/dsh-provider-usage/test/unit/shared/unit-config.test.ts",
             "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts"
+            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/unit-registry-pure.test.ts"
           ],
           "comment": "#342 v4：src 级文件组分段（1）——index+user-adapters+ui-config+config（配置/入口面）；#768 D7 注册表文件随域迁 server/registry（路径同步，行为零改 + 双启用判据）；#768 D13 包根入口 src/index.ts 落地（apply/index.ts 显式具名薄转发，导出面零漂移）并入本段；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -882,7 +893,8 @@
             "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
             "packages/dsh-provider-usage/test/unit/pipeline/unit-signal-lock.test.ts",
             "packages/dsh-provider-usage/test/integration/pipeline/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts"
+            "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/unit-registry-pure.test.ts"
           ],
           "comment": "#962 A 拆大段（三向之一：管线-注册表服务面）——原 pipeline 段的 v2/stats-service（#768 D6 随域迁 server/pipeline，净化缺席判据；阶段零补 stats-service 盲区）+ hotreload/path-resolve/provider-config（#768 D7 随域迁 server/registry，双启用判据）；testFiles 原样继承原段 22 个（零收窄，理由同 pipeline-history）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -914,7 +926,8 @@
             "packages/dsh-provider-usage/test/integration/registry/composition-root.test.ts",
             "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
             "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts"
+            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/unit-registry-pure.test.ts"
           ],
           "comment": "#342 二期：功能命名段（registry）——registry+user-adapter-loader（注册表域，25s；阶段零补 loader 盲区）；#768 D4 并入 server/adapters/register.ts（内置装配 fail-fast，杀灭面为 test/integration/adapters/composition-root）；#768 D7 注册表两文件随域迁 server/registry（路径同步，行为零改 + 双启用判据，杀灭面新增 test/integration/registry/composition-root）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -968,6 +981,8 @@
             "packages/dsh-provider-usage/test/unit/report/unit-report-executor.test.ts",
             "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
             "packages/dsh-provider-usage/test/unit/trend/unit-trend-ledger.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/unit-trend-sanitize-dir.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/unit-trend-shard-row.test.ts",
             "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts"
           ],
           "comment": "阶段零新段（D17 分层变异）：E1 事件采集面——collector+types（折叠状态机/归属归一）；testFiles 含 unit-trend（杀灭面为该层测试）；#768 D9 采集两文件随域迁 server/collect（路径同步，零行为变更，杀灭面新增 test/integration/collect/composition-root）。"
@@ -1001,7 +1016,8 @@
             "packages/dsh-provider-usage/test/unit/report/unit-report-b2-3.test.ts",
             "packages/dsh-provider-usage/test/unit/report/unit-report-executor.test.ts",
             "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
-            "packages/dsh-provider-usage/test/unit/server-shared/unit-s2-contracts.test.ts"
+            "packages/dsh-provider-usage/test/unit/server-shared/unit-s2-contracts.test.ts",
+            "packages/dsh-provider-usage/test/unit/schedule/unit-schedule-pure.test.ts"
           ],
           "comment": "阶段零新段（D17 分层变异）：E3 报告调度面——schedule+scheduler+tasks；阶段二（D8）并入 last-run.ts（公共原语）；#768 D1 起配置面归 server/config 域（shape/prompts/normalize/store/service）；#768 D2 起调度面整域归 server/schedule（due/scheduler/tasks/store，domain2/schedule 与 common/last-run 旧址删除，interface.ts/deps.ts 以 facade/type-only 口径排除）；#1010 B1 纳入 retry-policy/retry-ledger（纯状态机 + durable JSON/CAS/recover）；testFiles 含 unit-report/unit-report-executor + test/integration/schedule/composition-root（状态/持久化、串行锁与门面装配判据）。"
         },
@@ -1046,6 +1062,7 @@
             "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
             "packages/dsh-provider-usage/test/unit/common/unit-errsurf.test.ts",
             "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
+            "packages/dsh-provider-usage/test/unit/routes/unit-refactor-pure.test.ts",
             "packages/dsh-provider-usage/test/unit/routes/unit-routes.test.ts"
           ],
           "comment": "阶段一新段（评审 P1-5 前置）：E5/C6 路由面——stats+adapters+ui+reports；先抽纯函数（clampTrendN/isReportPeriodValid/isReportKeyValid/isTaskIdValid）补 unit-routes 再开段；testFiles 含 unit-routes/unit-report/unit-apply；#768 D10 stats/adapters 两文件由 domain1/routes 改名迁 server/data-routes（路径同步，零行为变更，杀灭面新增 test/integration/data-routes/composition-root）；#768 D11 reports 由 domain2/routes 迁 server/report-routes（interface 门面 + deps 注入面 + 配置窄口消费，零行为变更，杀灭面新增 test/integration/report-routes/composition-root，逆序释放判据锁定）；#768 D12 ui 四块（health/trend/ui-config/events）+ 装配形状（context）由 domain2/routes 迁 server/ui-routes（一域四块不升域，interface 门面 + deps 注入面 + 广播窄口，零行为变更，杀灭面新增 test/integration/ui-routes/composition-root，健康读 errsurf 与 SSE 非可靠判据锁定）。"

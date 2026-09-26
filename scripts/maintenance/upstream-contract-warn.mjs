@@ -139,30 +139,52 @@ function discoverASources(root) {
   return out.sort();
 }
 
+/** 是不是一个 AST 节点（有 `type` 字段的对象）；原始值、null、数组都不是。 */
+export function isAstNode(v) {
+  return v !== null && typeof v === "object" && typeof v.type === "string";
+}
+
+/**
+ * 把 `node` 的子节点逐个喂给 `visit(child, node)`。`loc`/`range` 是元数据不是子节点，
+ * 数组里的元素逐个判、其余字段按单个判——两处遍历（const 收集与形态识别）共用这一份规则。
+ */
+function eachAstChild(node, visit) {
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "range") continue;
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const c of child) if (isAstNode(c)) visit(c, node);
+    } else if (isAstNode(child)) visit(child, node);
+  }
+}
+
+/** 先序遍历整棵树：`visit(node, parent)` 在进子节点之前先到，根的 parent 为 null。 */
+function walkAst(root, visit) {
+  (function walk(node, parent) {
+    if (!isAstNode(node)) return;
+    visit(node, parent);
+    eachAstChild(node, walk);
+  })(root, null);
+}
+
+function collectConstDecl(node, inits) {
+  for (const d of node.declarations) {
+    if (d.id.type !== "Identifier") continue;
+    if (!inits.has(d.id.name)) inits.set(d.id.name, []);
+    inits.get(d.id.name).push(staticString(d.init));
+  }
+}
+
 export function collectFileConsts(ast) {
   const inits = new Map();
   const dirtied = new Set();
-  (function walk(node) {
-    if (!node || typeof node.type !== "string") return;
-    if (node.type === "VariableDeclaration" && node.kind === "const") {
-      for (const d of node.declarations) {
-        if (d.id.type !== "Identifier") continue;
-        if (!inits.has(d.id.name)) inits.set(d.id.name, []);
-        inits.get(d.id.name).push(staticString(d.init));
-      }
-    }
+  walkAst(ast, (node) => {
+    if (node.type === "VariableDeclaration" && node.kind === "const") collectConstDecl(node, inits);
     if (node.type === "AssignmentExpression" && node.left.type === "Identifier")
       dirtied.add(node.left.name);
     if (node.type === "UpdateExpression" && node.argument.type === "Identifier")
       dirtied.add(node.argument.name);
-    for (const key of Object.keys(node)) {
-      if (key === "loc" || key === "range") continue;
-      const child = node[key];
-      if (Array.isArray(child)) {
-        for (const c of child) if (c && typeof c.type === "string") walk(c);
-      } else if (child && typeof child.type === "string") walk(child);
-    }
-  })(ast);
+  });
   const clean = new Map();
   const nonliteral = new Set();
   for (const [name, list] of inits) {
@@ -199,42 +221,53 @@ function pushServiceInto(acc, node, verb, r) {
   else acc.forwarding.push({ ...atNode(node), verb, why: r.why ?? r.kind });
 }
 
+/** `const X_SERVICE = "…"`：自家定义的服务名常量，记下来但不对 B 断言。 */
+function collectBlessedValue(d, acc) {
+  if (!/SERVICE/.test(d.id.name)) return;
+  const v = staticString(d.init);
+  if (v !== null) acc.blessedValues.add(v);
+}
+
+/**
+ * `export const inject = [...]`：数组元只记 inventory。元素是 spread 或动态时名字静态不可知，
+ * 这里静默不收（元素级不分类，spread 由 `ctx.inject([...])` 那条判据记 forwarding）。
+ */
+function collectInjectArray(d, acc, hop) {
+  if (d.id.name !== "inject" || !d.init || d.init.type !== "ArrayExpression") return;
+  const names = [];
+  for (const el of d.init.elements) {
+    if (!el) continue;
+    const r = hop(el);
+    if (r.kind === "literal" || r.kind === "hop") names.push(r.name);
+  }
+  acc.injectArrays.push({ ...atNode(d.id), names });
+}
+
 function visitAConst(node, acc, hop) {
   if (node.type !== "VariableDeclaration" || node.kind !== "const") return;
   for (const d of node.declarations) {
     if (d.id.type !== "Identifier") continue;
-    if (/SERVICE/.test(d.id.name)) {
-      const v = staticString(d.init);
-      if (v !== null) acc.blessedValues.add(v);
-    }
-    if (d.id.name === "inject" && d.init && d.init.type === "ArrayExpression") {
-      const names = [];
-      for (const el of d.init.elements) {
-        if (!el) continue;
-        const r = hop(el);
-        if (r.kind === "literal" || r.kind === "hop") names.push(r.name);
-      }
-      acc.injectArrays.push({ ...atNode(d.id), names });
-    }
+    collectBlessedValue(d, acc);
+    collectInjectArray(d, acc, hop);
   }
 }
 
-function visitAService(node, acc, cx) {
-  if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return false;
-  const recv = node.callee.object;
-  const prop = staticProp(node.callee);
-  if (recv.type !== "Identifier" || recv.name !== "ctx" || prop === null) return false;
-  if (prop !== "get" && prop !== "provide" && prop !== "inject") return false;
-  if (prop === "inject" && (!node.arguments[0] || node.arguments[0].type !== "ArrayExpression"))
-    return true;
-  if (prop === "get" || prop === "provide") {
-    const r = cx.hop(node.arguments[0]);
-    pushServiceInto(acc, node, prop, r);
-    if (prop === "provide" && (r.kind === "literal" || r.kind === "hop")) {
-      acc.provides.push({ ...atNode(node), name: r.name, via: r.kind });
-    }
-    return true;
+/** `ctx.get(x)` / `ctx.provide(x)`：单个服务名，两者在「是否算 provide」上分道。 */
+function visitServiceSingle(node, acc, cx, prop) {
+  const r = cx.hop(node.arguments[0]);
+  pushServiceInto(acc, node, prop, r);
+  if (prop === "provide" && (r.kind === "literal" || r.kind === "hop")) {
+    acc.provides.push({ ...atNode(node), name: r.name, via: r.kind });
   }
+}
+
+/**
+ * `ctx.inject([...])`：数组形态的批量注入。
+ *
+ * 数组不是数组时（`ctx.inject(x)` 形态）不是「批量注入」而是别的东西，交给调用方判；
+ * 元素是 spread 时服务名静态不可知，记 forwarding 而不是猜一个名字。
+ */
+function visitServiceInject(node, acc, cx) {
   for (const el of node.arguments[0].elements) {
     if (!el || el.type === "SpreadElement") {
       acc.forwarding.push({ ...atNode(node), verb: "inject", why: "spread" });
@@ -242,57 +275,117 @@ function visitAService(node, acc, cx) {
     }
     pushServiceInto(acc, node, "inject", cx.hop(el));
   }
+}
+
+const SERVICE_VERBS = new Set(["get", "provide", "inject"]);
+
+function visitAService(node, acc, cx) {
+  const prop = ctxCallProp(node);
+  if (prop === null || !SERVICE_VERBS.has(prop)) return false;
+  if (prop === "inject") {
+    if (node.arguments[0] && node.arguments[0].type === "ArrayExpression")
+      visitServiceInject(node, acc, cx);
+    return true;
+  }
+  visitServiceSingle(node, acc, cx, prop);
   return true;
 }
 
+/**
+ * `ctx.<verb>(...)` 的属性名；不是这种形态（不是调用、不是成员、接收者不是 ctx、属性算不出）
+ * 返回 null。A 侧三类判据——服务动词、事件动词、服务方法——都先过这一关。
+ */
+export function ctxCallProp(node) {
+  if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return null;
+  const recv = node.callee.object;
+  if (recv.type !== "Identifier" || recv.name !== "ctx") return null;
+  return staticProp(node.callee);
+}
+
+/** 事件第一参的四种归宿：字面量、const 单跳、级联（多跳/重赋值）、动态。 */
+function classifyEventArg(first, cx) {
+  const lit = staticString(first);
+  if (lit !== null) return { kind: "literal", name: lit };
+  if (!first || first.type !== "Identifier") return { kind: "dynamic" };
+  if (cx.clean.has(first.name)) return { kind: "hop", name: cx.clean.get(first.name) };
+  if (cx.nonliteral.has(first.name)) return { kind: "cascade" };
+  return { kind: "dynamic" };
+}
+
 function visitAEvent(node, acc, cx) {
-  if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
+  const prop = ctxCallProp(node);
+  if (prop === null || !EVENT_VERBS.includes(prop)) return;
+  const hit = classifyEventArg(node.arguments[0], cx);
+  if (hit.kind === "dynamic") acc.dynamics.push({ ...atNode(node), verb: prop });
+  else if (hit.kind === "cascade") acc.cascades.push({ ...atNode(node), verb: prop });
+  else acc.events.push({ ...atNode(node), verb: prop, name: hit.name, via: hit.kind });
+}
+
+/**
+ * `ctx.<prop>()`：服务面调用点。`ctx.get/provide/inject` 与事件动词不是服务调用（它们各自
+ * 另有判据），框架内建动词也不是。
+ */
+/** 服务名判据：框架内建动词与事件动词都不是「服务面」成员（它们各自另有判据）。 */
+export function isContractSvcName(svc) {
+  return !FRAMEWORK_ONLY.has(svc) && !EVENT_VERBS.includes(svc);
+}
+
+function visitServiceCall(node, acc) {
   const recv = node.callee.object;
   const prop = staticProp(node.callee);
-  if (recv.type !== "Identifier" || recv.name !== "ctx" || prop === null) return;
-  if (!EVENT_VERBS.includes(prop)) return;
-  const first = node.arguments[0];
-  const lit = staticString(first);
-  if (lit !== null) acc.events.push({ ...atNode(node), verb: prop, name: lit, via: "literal" });
-  else if (first && first.type === "Identifier" && cx.clean.has(first.name)) {
-    acc.events.push({ ...atNode(node), verb: prop, name: cx.clean.get(first.name), via: "hop" });
-  } else if (first && first.type === "Identifier" && cx.nonliteral.has(first.name)) {
-    acc.cascades.push({ ...atNode(node), verb: prop });
-  } else acc.dynamics.push({ ...atNode(node), verb: prop });
+  if (recv.type === "Identifier" && recv.name === "ctx" && prop !== null) {
+    if (isContractSvcName(prop)) {
+      acc.svcCalls.push({ ...atNode(node), svc: prop, method: null });
+    }
+  }
+}
+
+/** `ctx.<svc>.<method>()`：带方法名的服务调用点（R4 判的就是它）。 */
+function visitMethodCall(node, acc) {
+  const recv = node.callee.object;
+  const prop = staticProp(node.callee);
+  if (
+    recv.type === "MemberExpression" &&
+    recv.object.type === "Identifier" &&
+    recv.object.name === "ctx" &&
+    prop !== null
+  ) {
+    const svc = staticProp(recv);
+    if (svc !== null && !FRAMEWORK_ONLY.has(svc))
+      acc.calls.push({ ...atNode(node), svc, method: prop });
+  }
+}
+
+/**
+ * `ctx.<svc>` 单独出现（不是被调用的、也不是别人的接收者）：服务**引用**而非调用。
+ * parent 判据用来排掉前两种形态的重复计数——它们各自已经记过了。
+ */
+/**
+ * 这个 `ctx.<svc>` 是不是别的节点的子件——被调用（调用点已记）、或挂在别人身上（方法调用已记）。
+ * 是子件就说明更具体的判据已经收过，parent 判据要避重。
+ */
+export function isOwnedByParent(node, parent) {
+  if (!parent) return false;
+  if (parent.type === "CallExpression") return parent.callee === node;
+  if (parent.type === "MemberExpression") return parent.object === node;
+  return false;
+}
+
+function visitServiceRef(node, parent, acc) {
+  if (node.object.type !== "Identifier" || node.object.name !== "ctx") return;
+  if (isOwnedByParent(node, parent)) return;
+  const svc = staticProp(node);
+  if (svc === null || !isContractSvcName(svc)) return;
+  acc.svcRefs.push({ ...atNode(node), svc });
 }
 
 function visitACall(node, parent, acc) {
   if (node.type === "CallExpression" && node.callee.type === "MemberExpression") {
-    const recv = node.callee.object;
-    const prop = staticProp(node.callee);
-    if (recv.type === "Identifier" && recv.name === "ctx" && prop !== null) {
-      if (!FRAMEWORK_ONLY.has(prop) && !EVENT_VERBS.includes(prop)) {
-        acc.svcCalls.push({ ...atNode(node), svc: prop, method: null });
-      }
-    } else if (
-      recv.type === "MemberExpression" &&
-      recv.object.type === "Identifier" &&
-      recv.object.name === "ctx" &&
-      prop !== null
-    ) {
-      const svc = staticProp(recv);
-      if (svc !== null && !FRAMEWORK_ONLY.has(svc))
-        acc.calls.push({ ...atNode(node), svc, method: prop });
-    }
+    visitServiceCall(node, acc);
+    visitMethodCall(node, acc);
     return;
   }
-  if (
-    node.type === "MemberExpression" &&
-    node.object.type === "Identifier" &&
-    node.object.name === "ctx" &&
-    parent &&
-    !(parent.type === "CallExpression" && parent.callee === node) &&
-    !(parent.type === "MemberExpression" && parent.object === node)
-  ) {
-    const svc = staticProp(node);
-    if (svc !== null && !FRAMEWORK_ONLY.has(svc) && !EVENT_VERBS.includes(svc))
-      acc.svcRefs.push({ ...atNode(node), svc });
-  }
+  if (node.type === "MemberExpression") visitServiceRef(node, parent, acc);
 }
 
 export function analyzeAFile(ast) {
@@ -312,20 +405,12 @@ export function analyzeAFile(ast) {
     blessedValues: new Set(),
   };
   const cx = { clean, nonliteral, hop: (n) => hopServiceOf(n, clean, nonliteral) };
-  (function walk(node, parent) {
-    if (!node || typeof node.type !== "string") return;
+  walkAst(ast, (node, parent) => {
     visitAConst(node, acc, cx.hop);
     visitAService(node, acc, cx);
     visitAEvent(node, acc, cx);
     visitACall(node, parent, acc);
-    for (const key of Object.keys(node)) {
-      if (key === "loc" || key === "range") continue;
-      const child = node[key];
-      if (Array.isArray(child)) {
-        for (const c of child) if (c && typeof c.type === "string") walk(c, node);
-      } else if (child && typeof child.type === "string") walk(child, node);
-    }
-  })(ast, null);
+  });
   return {
     services: acc.services,
     provides: acc.provides,
@@ -376,21 +461,36 @@ export function stripComments(src) {
       i += 1;
       continue;
     }
-    if (ch === "/" && next === "*") {
-      const end = src.indexOf("*/", i + 2);
-      i = end === -1 ? src.length : end + 2;
-      out += "\n";
-      continue;
-    }
-    if (ch === "/" && next === "/") {
-      const end = src.indexOf("\n", i + 2);
-      i = end === -1 ? src.length : end;
+    const commentEnd = commentEndAt(src, i, next);
+    if (commentEnd !== null) {
+      i = commentEnd.next;
+      out += commentEnd.replacement;
       continue;
     }
     out += ch;
     i += 1;
   }
   return out;
+}
+
+/**
+ * 当前位置是否开启一段注释；是则返回「跳过到哪 + 用什么替换」。不是注释返回 null。
+ *
+ * 块注释替换成换行、行注释替换成空串：块注释里可能藏着换行，替成换行才能保持后续的
+ * 行号与「行内有没有东西」不变（行注释整行丢掉即可）。两种形态的**结束位置规则不同**
+ * （块注释找闭合标记 vs 行注释找换行），故各自成支而不是共用一个查找。
+ */
+function commentEndAt(src, i, next) {
+  if (src[i] !== "/") return null;
+  if (next === "*") {
+    const end = src.indexOf("*/", i + 2);
+    return { next: end === -1 ? src.length : end + 2, replacement: "\n" };
+  }
+  if (next === "/") {
+    const end = src.indexOf("\n", i + 2);
+    return { next: end === -1 ? src.length : end, replacement: "" };
+  }
+  return null;
 }
 
 function skipSpaces(s, i) {
@@ -421,6 +521,9 @@ function readString(s, i) {
   return null;
 }
 
+/** 三种引号字符（字符串与模板字面量都能跨行），正文头尾扫共用这一份判定。 */
+const QUOTE_CHARS = new Set(['"', "\u0027", "\u0060"]);
+
 function matchBrace(s, openIdx) {
   let depth = 0;
   let j = openIdx;
@@ -430,7 +533,7 @@ function matchBrace(s, openIdx) {
     if (q !== null) {
       if (ch === "\\") j += 1;
       else if (ch === q) q = null;
-    } else if (ch === '"' || ch === "\u0027" || ch === "\u0060") q = ch;
+    } else if (QUOTE_CHARS.has(ch)) q = ch;
     else if (ch === "{") depth += 1;
     else if (ch === "}") {
       depth -= 1;
@@ -441,55 +544,62 @@ function matchBrace(s, openIdx) {
   return null;
 }
 
+const BLOCK_KEYWORDS = ["interface", "class", "enum", "namespace", "module"];
+
+/**
+ * 一个声明的名字与它之后的下标（字符串字面量名或标识符名）；两种形态都不是时返回 null。
+ *
+ * 与关键字匹配分开：关键字是**五种固定词**的识别，名字是**任意 token** 的读法，两者的
+ * 词法规则各自会变（加一种声明形态 vs 换一种名字写法）。
+ */
+function readDeclName(code, from) {
+  const j = skipSpaces(code, from);
+  if (code[j] === '"' || code[j] === "\u0027") {
+    const r = readString(code, j);
+    return r === null ? null : { name: r.value, end: r.end };
+  }
+  if (j < code.length && isIdStart(code[j])) {
+    let k = j;
+    while (k < code.length && isIdPart(code[k])) k += 1;
+    return { name: code.slice(j, k), end: k };
+  }
+  return null;
+}
+
+/**
+ * 从名字之后找到**顶层**的 `{`（顶层 = 不在泛型参数 `<…>` 内）：
+ * 泛型参数里可以有花括号，声明体只可能在角括号归零之后。`;` 表示这是个无体声明，
+ * 不是判据要的面——返回 -1。
+ */
+function bodyBraceAt(code, from) {
+  let angle = 0;
+  for (let k = from; k < code.length; k += 1) {
+    const ch = code[k];
+    if (ch === "<") angle += 1;
+    else if (ch === ">") angle = Math.max(0, angle - 1);
+    else if (ch === "{" && angle === 0) return k;
+    else if (ch === ";" && angle === 0) return -1;
+  }
+  return -1;
+}
+
 export function findBlocks(code) {
   const blocks = [];
   let i = 0;
   while (i < code.length) {
-    let hit = null;
-    for (const kind of ["interface", "class", "enum", "namespace", "module"]) {
-      if (matchWord(code, i, kind)) {
-        hit = kind;
-        break;
-      }
-    }
-    if (hit === null) {
+    const hit = BLOCK_KEYWORDS.find((kind) => matchWord(code, i, kind));
+    if (hit === undefined) {
       i += 1;
       continue;
     }
-    let j = skipSpaces(code, i + hit.length);
-    let name = null;
-    if (code[j] === '"' || code[j] === "\u0027") {
-      const r = readString(code, j);
-      if (r === null) {
-        i = j + 1;
-        continue;
-      }
-      name = r.value;
-      j = r.end;
-    } else if (j < code.length && isIdStart(code[j])) {
-      let k = j;
-      while (k < code.length && isIdPart(code[k])) k += 1;
-      name = code.slice(j, k);
-      j = k;
-    } else {
-      i = j + 1;
+    const decl = readDeclName(code, i + hit.length);
+    if (decl === null) {
+      i = skipSpaces(code, i + hit.length) + 1;
       continue;
     }
-    let angle = 0;
-    let brace = -1;
-    let k = j;
-    while (k < code.length) {
-      const ch = code[k];
-      if (ch === "<") angle += 1;
-      else if (ch === ">") angle = Math.max(0, angle - 1);
-      else if (ch === "{" && angle === 0) {
-        brace = k;
-        break;
-      } else if (ch === ";" && angle === 0) break;
-      k += 1;
-    }
+    const brace = bodyBraceAt(code, decl.end);
     if (brace === -1) {
-      i = k + 1;
+      i = decl.end + 1;
       continue;
     }
     const m = matchBrace(code, brace);
@@ -497,7 +607,7 @@ export function findBlocks(code) {
       i = brace + 1;
       continue;
     }
-    blocks.push({ kind: hit, name, body: m.body });
+    blocks.push({ kind: hit, name: decl.name, body: m.body });
     i = m.end;
   }
   return blocks;
@@ -511,7 +621,7 @@ function skipBalancedAt(body, i, open, close) {
     if (q !== null) {
       if (ch === "\\") i += 1;
       else if (ch === q) q = null;
-    } else if (ch === '"' || ch === "'" || ch === "`") q = ch;
+    } else if (QUOTE_CHARS.has(ch)) q = ch;
     else if (ch === open) d += 1;
     else if (ch === close) {
       d -= 1;
@@ -525,28 +635,62 @@ function skipBalancedAt(body, i, open, close) {
   return i;
 }
 
+/** 成员声明的终止符：分号与逗号（都在顶层时才生效）。 */
+export function isTerminator(ch) {
+  return ch === ";" || ch === ",";
+}
+
+/** 三层括号各占一个深度槽：`{ }` `( )` `[ ]`。未配对的字符没有槽位。 */
+const BRACKET_KINDS = new Map([
+  ["{", 0],
+  ["}", 0],
+  ["(", 1],
+  [")", 1],
+  ["[", 2],
+  ["]", 2],
+]);
+const BRACKET_OPEN = new Set(["{", "(", "["]);
+
+/**
+ * 只有 `}` 撞到底算终止信号（裸 `}` 说明本成员到此为止）；`)` `]` 撞底不终止，
+ * 只把对应槽位退成负数——之后同层的 `}` 与终止符就不再算顶层。这是既有判词语义，逐字保留。
+ */
+const BRACKET_STOP = new Set(["}"]);
+
+export function atTopLevel(depth) {
+  return depth.every((d) => d === 0);
+}
+
+export const BRACKET_OTHER = "other";
+export const BRACKET_TOP = "top";
+
+/** 走一步括号：开括号进槽、`}` 撞底报终止、其余闭括号退槽、非括号字符不动作。 */
+export function stepBracketAt(ch, depth) {
+  const kind = BRACKET_KINDS.get(ch);
+  if (kind === undefined) return BRACKET_OTHER;
+  if (BRACKET_OPEN.has(ch)) {
+    depth[kind] += 1;
+    return "opened";
+  }
+  if (BRACKET_STOP.has(ch) && atTopLevel(depth)) return BRACKET_TOP;
+  depth[kind] -= 1;
+  return "closed";
+}
+
 function skipTerminatorAt(body, i) {
-  let dBrace = 0;
-  let dParen = 0;
-  let dBracket = 0;
+  const depth = [0, 0, 0];
   let q = null;
   while (i < body.length) {
     const ch = body[i];
     if (q !== null) {
       if (ch === "\\") i += 1;
       else if (ch === q) q = null;
-    } else if (ch === '"' || ch === "'" || ch === "`") q = ch;
-    else if (ch === "{") dBrace += 1;
-    else if (ch === "}") {
-      if (dBrace === 0 && dParen === 0 && dBracket === 0) return i;
-      dBrace -= 1;
-    } else if (ch === "(") dParen += 1;
-    else if (ch === ")") dParen -= 1;
-    else if (ch === "[") dBracket += 1;
-    else if (ch === "]") dBracket -= 1;
-    else if ((ch === ";" || ch === ",") && dBrace === 0 && dParen === 0 && dBracket === 0) {
+    } else if (QUOTE_CHARS.has(ch)) q = ch;
+    else if (isTerminator(ch) && atTopLevel(depth)) {
       i += 1;
       return i;
+    } else {
+      if (stepBracketAt(ch, depth) === BRACKET_TOP) return i;
     }
     i += 1;
   }
@@ -581,9 +725,12 @@ function typeHeadAt(body, i) {
   return { full: body.slice(i, k), next: k };
 }
 
-function headBracketAt(st) {
-  const { body } = st;
-  let j = st.i + 1;
+/**
+ * `["…"]` 里找闭合的 `]`：方括号内允许字符串，字符串里的 `]` 不算闭合。
+ * 这里只认单双引号（模板字面量不出现在计算键里），与正文的三引号规则刻意不同。
+ */
+function closeBracketAt(body, from) {
+  let j = from;
   let q = null;
   while (j < body.length) {
     const c = body[j];
@@ -594,13 +741,25 @@ function headBracketAt(st) {
     else if (c === "]") break;
     j += 1;
   }
-  const t = body.slice(st.i + 1, j).trim();
+  return j;
+}
+
+/** 键内容是带引号的字符串字面量时返回键名；不是（计算键、模板串等）返回 null 即不透明。 */
+export function unquotedMemberName(t) {
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
-    const nm = t.slice(1, -1);
+    return t.slice(1, -1);
+  }
+  return null;
+}
+
+function headBracketAt(st) {
+  const { body } = st;
+  const j = closeBracketAt(body, st.i + 1);
+  const nm = unquotedMemberName(body.slice(st.i + 1, j).trim());
+  if (nm === null) st.opaque += 1;
+  else {
     st.members.add(nm);
     st.quoted.add(nm);
-  } else {
-    st.opaque += 1;
   }
   st.i = skipTerminatorAt(body, j + 1);
 }
@@ -627,48 +786,82 @@ function headQuotedAt(st) {
   st.i = skipTerminatorAt(body, i);
 }
 
+/** 读一个标识符 token：名字与它之后的下标。 */
+function readIdentAt(body, i) {
+  let k = i;
+  while (k < body.length && isIdPart(body[k])) k += 1;
+  return { text: body.slice(i, k), next: k };
+}
+
+/** 跳过 `<…>` 泛型参数（角括号可嵌），返回 `>` 之后的位置；没闭合就停在文末。 */
+function skipGenericAt(body, i) {
+  let d = 0;
+  while (i < body.length) {
+    if (body[i] === "<") d += 1;
+    else if (body[i] === ">") {
+      d -= 1;
+      if (d === 0) return i + 1;
+    }
+    i += 1;
+  }
+  return i;
+}
+
+/**
+ * 成员名之后的形态：`(` 方法签名、`= 默认值`（声明到此为止）、`: T` 类型（顺带记 links）。
+ * `terminated` 为真时 `next` 已是越过终止符的位置，调用方不要再跳一次。
+ */
+function headTailAt(body, i, name, st) {
+  if (body[i] === "(") return { terminated: false, next: skipBalancedAt(body, i, "(", ")") };
+  if (body[i] === "=") return { terminated: true, next: skipTerminatorAt(body, i + 1) };
+  if (body[i] !== ":") return { terminated: false, next: i };
+  const j = skipSpaces(body, i + 1);
+  const t = typeHeadAt(body, j);
+  if (t.full !== "") st.links.set(name, t.full);
+  return { terminated: false, next: t.next };
+}
+
 function headIdentAt(st) {
   const { body } = st;
-  let k = st.i;
-  while (k < body.length && isIdPart(body[k])) k += 1;
-  const nm = body.slice(st.i, k);
-  let i = k;
-  if (nm === "new" && body[skipSpaces(body, i)] === "(") {
-    i = skipBalancedAt(body, i, "(", ")");
-    st.i = skipTerminatorAt(body, i);
+  const nm = readIdentAt(body, st.i);
+  let i = skipSpaces(body, nm.next);
+  if (nm.text === "new" && body[i] === "(") {
+    st.i = skipTerminatorAt(body, skipBalancedAt(body, i, "(", ")"));
     return;
   }
-  st.members.add(nm);
-  i = skipSpaces(body, i);
-  if (body[i] === "?" || body[i] === "!") i += 1;
-  i = skipSpaces(body, i);
-  if (body[i] === "<") {
-    let d = 0;
-    while (i < body.length) {
-      if (body[i] === "<") d += 1;
-      else if (body[i] === ">") {
-        d -= 1;
-        if (d === 0) {
-          i += 1;
-          break;
-        }
-      }
-      i += 1;
-    }
-    i = skipSpaces(body, i);
-  }
-  if (body[i] === "(") i = skipBalancedAt(body, i, "(", ")");
-  else if (body[i] === ":") {
-    i = skipSpaces(body, i + 1);
-    const t = typeHeadAt(body, i);
-    if (t.full !== "") st.links.set(nm, t.full);
-    i = t.next;
-  } else if (body[i] === "=") {
-    i = skipTerminatorAt(body, i + 1);
-    st.i = i;
-    return;
-  }
-  st.i = skipTerminatorAt(body, i);
+  st.members.add(nm.text);
+  if (body[i] === "?" || body[i] === "!") i = skipSpaces(body, i + 1);
+  if (body[i] === "<") i = skipSpaces(body, skipGenericAt(body, i));
+  const tail = headTailAt(body, i, nm.text, st);
+  st.i = tail.terminated ? tail.next : skipTerminatorAt(body, tail.next);
+}
+
+export const HEAD_SEP = "sep";
+export const HEAD_PARAMS = "params";
+export const HEAD_BRACKET = "bracket";
+export const HEAD_QUOTED = "quoted";
+export const HEAD_IDENT = "ident";
+export const HEAD_OTHER = "other";
+
+/**
+ * 成员列表里下一个 token 的形态：分隔符、参数表（构造函数残留）、计算键、引号名、
+ * 标识符名、其余（修饰符与修饰符修饰符）。认形态与各形态各自的消费规则是两件事。
+ */
+export function headKindAt(body, i) {
+  const ch = body[i];
+  if (ch === ";" || ch === ",") return HEAD_SEP;
+  if (ch === "(") return HEAD_PARAMS;
+  if (ch === "[") return HEAD_BRACKET;
+  if (ch === '"' || ch === "'") return HEAD_QUOTED;
+  if (isIdStart(ch)) return HEAD_IDENT;
+  return HEAD_OTHER;
+}
+
+/** 杂字符（修饰符之类）：整段跳过；没跳掉时前进一格，保证扫描推进不空转。 */
+function skipOtherHeadAt(st) {
+  const ch = st.body[st.i];
+  st.i = skipModifiersAt(st.body, st.i);
+  if (st.body[st.i] === ch) st.i += 1;
 }
 
 export function extractMembers(body) {
@@ -676,29 +869,14 @@ export function extractMembers(body) {
   while (st.i < body.length) {
     st.i = skipSpaces(body, st.i);
     if (st.i >= body.length) break;
-    const ch = body[st.i];
-    if (ch === ";" || ch === ",") {
-      st.i += 1;
-      continue;
-    }
-    if (ch === "(") {
+    const kind = headKindAt(body, st.i);
+    if (kind === HEAD_IDENT) headIdentAt(st);
+    else if (kind === HEAD_QUOTED) headQuotedAt(st);
+    else if (kind === HEAD_BRACKET) headBracketAt(st);
+    else if (kind === HEAD_PARAMS)
       st.i = skipTerminatorAt(body, skipBalancedAt(body, st.i, "(", ")"));
-      continue;
-    }
-    if (ch === "[") {
-      headBracketAt(st);
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      headQuotedAt(st);
-      continue;
-    }
-    if (isIdStart(ch)) {
-      headIdentAt(st);
-      continue;
-    }
-    st.i = skipModifiersAt(body, st.i);
-    if (body[st.i] === ch) st.i += 1;
+    else if (kind === HEAD_SEP) st.i += 1;
+    else skipOtherHeadAt(st);
   }
   return { members: st.members, quoted: st.quoted, links: st.links, opaque: st.opaque };
 }
@@ -754,6 +932,32 @@ export function readCatalog(root) {
   return versions;
 }
 
+/** 上游包元数据；不可解析即结构异常（判词逐字保留）。 */
+function readPeerMeta(root, pkgFile) {
+  try {
+    return JSON.parse(readFileSync(pkgFile, "utf8"));
+  } catch {
+    throw new Error(`上游包元数据不可解析：${relPosix(root, pkgFile)}`);
+  }
+}
+
+/** 一个包的 node_modules/@deepseek-ai 作用域内逐个上游包收进 found，顺序即目录序。 */
+function collectScopePeers(root, pkg, scope, found) {
+  for (const d of readdirSync(scope, { withFileTypes: true })) {
+    if (!d.isDirectory() && !d.isSymbolicLink()) continue;
+    const dir = join(scope, d.name);
+    const pkgFile = join(dir, "package.json");
+    if (!existsSync(pkgFile)) continue;
+    const meta = readPeerMeta(root, pkgFile);
+    found.push({
+      pkg: pkg,
+      name: `@deepseek-ai/${d.name}`,
+      dir,
+      version: String(meta.version ?? ""),
+    });
+  }
+}
+
 export function resolvePeers(root) {
   const found = [];
   const packagesDir = join(root, "packages");
@@ -764,24 +968,7 @@ export function resolvePeers(root) {
     if (!e.isDirectory()) continue;
     const scope = join(packagesDir, e.name, "node_modules", "@deepseek-ai");
     if (!existsSync(scope) || !statSync(scope).isDirectory()) continue;
-    for (const d of readdirSync(scope, { withFileTypes: true })) {
-      if (!d.isDirectory() && !d.isSymbolicLink()) continue;
-      const dir = join(scope, d.name);
-      const pkgFile = join(dir, "package.json");
-      if (!existsSync(pkgFile)) continue;
-      let meta = null;
-      try {
-        meta = JSON.parse(readFileSync(pkgFile, "utf8"));
-      } catch {
-        throw new Error(`上游包元数据不可解析：${relPosix(root, pkgFile)}`);
-      }
-      found.push({
-        pkg: e.name,
-        name: `@deepseek-ai/${d.name}`,
-        dir,
-        version: String(meta.version ?? ""),
-      });
-    }
+    collectScopePeers(root, e.name, scope, found);
   }
   return found;
 }
@@ -873,39 +1060,100 @@ export function closureMembers(entryAbs) {
     }
     files += 1;
     const parsed = parseDtsMembers(text);
-    const tables = new Map([...parsed.ifaces, ...parsed.classes]);
-    for (const [n, v] of tables) {
-      if (!ifaces.has(n)) {
-        ifaces.set(n, {
-          members: new Set(),
-          quoted: new Set(),
-          links: new Map(),
-          opaque: 0,
-          classKind: parsed.classes.has(n),
-        });
-      }
-      const acc = ifaces.get(n);
-      for (const m of v.members) acc.members.add(m);
-      for (const q of v.quoted) acc.quoted.add(q);
-      for (const [k, t] of v.links) if (!acc.links.has(k)) acc.links.set(k, t);
-      acc.opaque += v.opaque;
-      opaque += v.opaque;
-    }
+    opaque += mergeIfaceTables(ifaces, parsed);
     for (const m of parsed.modules) modules.push({ file: real, name: m.name });
-    const code = stripComments(text);
-    const specs = new Set();
-    const re = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)(["\u0027])(\.[^"\u0027]*)\1/g;
-    let mt = null;
-    while ((mt = re.exec(code)) !== null) specs.add(mt[2]);
-    // 裸 side-effect import（如 context 链的 import "./fiber"）：无 from/import(/require( 前缀，上式收不到。
-    const bareRe = /(^|[;{}()\s])import\s*(["\u0027])(\.[^"\u0027]*)\2/g;
-    while ((mt = bareRe.exec(code)) !== null) specs.add(mt[3]);
-    for (const s of specs) {
+    for (const s of relativeSpecifiersOf(text)) {
       const r = resolveRelativeSpec(real, s);
       if (r !== null && !seen.has(realpathSync(r))) queue.push(r);
     }
   }
   return { ifaces, modules, opaque, files };
+}
+
+/**
+ * 把一个文件解析出的表合并进累加器（同名成员取并集，links 不后到保留先到的类型，opaque 累加）。
+ * 返回本文件新增的 opaque 量，让调用方只维护一个总计。
+ *
+ * 与 BFS 循环分开：「合并一个解析结果」与「遍历闭包」是两个变化原因——合并规则改了不应该跟着
+ * BFS 的去重/入队规则一起变。
+ */
+function mergeIfaceTables(ifaces, parsed) {
+  let opaque = 0;
+  for (const [n, v] of new Map([...parsed.ifaces, ...parsed.classes])) {
+    if (!ifaces.has(n)) {
+      ifaces.set(n, {
+        members: new Set(),
+        quoted: new Set(),
+        links: new Map(),
+        opaque: 0,
+        classKind: parsed.classes.has(n),
+      });
+    }
+    const acc = ifaces.get(n);
+    for (const m of v.members) acc.members.add(m);
+    for (const q of v.quoted) acc.quoted.add(q);
+    for (const [k, t] of v.links) if (!acc.links.has(k)) acc.links.set(k, t);
+    acc.opaque += v.opaque;
+    opaque += v.opaque;
+  }
+  return opaque;
+}
+
+/**
+ * 一份源文本里的相对请求读到器。
+ *
+ * 两个形态分开收：带 from / import( / require( 前缀的，与裸 side-effect import（如 context 链的
+ * import "./fiber"）——后者无前缀，上式收不到。先剥注释再扫：注释里的请求不是依赖。
+ */
+function relativeSpecifiersOf(text) {
+  const code = stripComments(text);
+  const specs = new Set();
+  let mt = null;
+  const re = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)(["\u0027])(\.[^"\u0027]*)\1/g;
+  while ((mt = re.exec(code)) !== null) specs.add(mt[2]);
+  const bareRe = /(^|[;{}()\s])import\s*(["\u0027])(\.[^"\u0027]*)\2/g;
+  while ((mt = bareRe.exec(code)) !== null) specs.add(mt[3]);
+  return specs;
+}
+
+/**
+ * 把一个闭包里的 Context 接口并进服务/事件/链接三张表。
+ *
+ * Context 是**接口**才有意义：class 形态的同名声明不是服务契约（`classKind` 时整体跳过），
+ * 成员按「含 / 是事件名，否则是服务名」分流，links 不后到覆盖先到的。
+ *
+ * 与外层逐 peer 累积分开：本函数只回答「一份闭包的 Context 说明什么」，不关心累积到哪了。
+ */
+function absorbContext(ctx, services, events, links) {
+  if (!ctx || ctx.classKind) return;
+  for (const m of ctx.members) {
+    if (m.includes("/")) events.add(m);
+    else services.add(m);
+  }
+  for (const [k, t] of ctx.links) if (!links.has(k)) links.set(k, t);
+}
+
+/** 一个 peer 闭包的方法表并进总表；引号成员额外并进事件全集（B 侧事件名的增补面）。 */
+function absorbMethodTables(closed, methodTables, events) {
+  for (const [iname, v] of closed.ifaces) {
+    if (!methodTables.has(iname)) methodTables.set(iname, new Set());
+    const acc = methodTables.get(iname);
+    for (const m of v.members) acc.add(m);
+    for (const q of v.quoted) {
+      acc.add(q);
+      if (q.includes("/")) events.add(q);
+    }
+  }
+}
+
+/** 报告里一个 peer 的一行摘要：名字、锁版、装载它的包、闭包文件数。 */
+function peerSummary(name, info, closed) {
+  return {
+    name,
+    version: info.version,
+    pkgs: [...new Set(info.pkgs)].sort(),
+    files: closed.files,
+  };
 }
 
 export function buildB(root) {
@@ -926,29 +1174,9 @@ export function buildB(root) {
     files += closed.files;
     opaque += closed.opaque;
     for (const m of closed.modules) moduleNames.push(`${name} :: ${m.name}`);
-    const ctx = closed.ifaces.get("Context");
-    if (ctx && !ctx.classKind) {
-      for (const m of ctx.members) {
-        if (m.includes("/")) events.add(m);
-        else services.add(m);
-      }
-      for (const [k, t] of ctx.links) if (!links.has(k)) links.set(k, t);
-    }
-    for (const [iname, v] of closed.ifaces) {
-      if (!methodTables.has(iname)) methodTables.set(iname, new Set());
-      const acc = methodTables.get(iname);
-      for (const m of v.members) acc.add(m);
-      for (const q of v.quoted) {
-        acc.add(q);
-        if (q.includes("/")) events.add(q);
-      }
-    }
-    peerList.push({
-      name,
-      version: info.version,
-      pkgs: [...new Set(info.pkgs)].sort(),
-      files: closed.files,
-    });
+    absorbContext(closed.ifaces.get("Context"), services, events, links);
+    absorbMethodTables(closed, methodTables, events);
+    peerList.push(peerSummary(name, info, closed));
   }
   return {
     services,
@@ -963,14 +1191,19 @@ export function buildB(root) {
   };
 }
 
-export function evaluate(A, B) {
+/**
+ * S2：被消费但 B 面没声明的服务名（blessed 值与 B 侧已声明的除外），按名字排序。
+ *
+ * 与 evaluate 分开：本函数只回答「哪些服务名没被对上」，不参与任何一条 fail 判定——
+ * s2fail 的阈值与白名单是另一件事（改阈值不该重读这段扫描）。
+ */
+function untrackedServiceNames(A, B, blessedValues) {
   const consumeNames = new Map();
   for (const s of A.services) {
     if (s.verb === "provide") continue;
     if (!consumeNames.has(s.name)) consumeNames.set(s.name, []);
     consumeNames.get(s.name).push(s);
   }
-  const blessedValues = new Set(A.blessedValues);
   const untracked = [];
   for (const [name, sites] of [...consumeNames.entries()].sort()) {
     if (B.services.has(name) || blessedValues.has(name)) continue;
@@ -980,12 +1213,16 @@ export function evaluate(A, B) {
       count: sites.length,
     });
   }
-  const s2fail =
-    untracked.length > UNTRACKED_BASE || untracked.some((u) => !KNOWN_UNTRACKED.includes(u.name));
-  const missingEvents = [...new Set(A.events.map((e) => e.name))]
-    .sort()
-    .filter((n) => !B.events.has(n));
-  const r2fail = missingEvents.length > 0;
+  return untracked;
+}
+
+/**
+ * R4：调用点的两种缺口——服务名在 B 面查不到方法表（untyped，服务根本不在契约里），
+ * 与方法表在但该方法没有（契约里有、调用了没声明的方法）。前者不判红只记录。
+ *
+ * 与 evaluate 分开同 S2：这里只产缺口清单，r4fail 的判定在调用方。
+ */
+function scanMethodCalls(A, B) {
   const missingMethods = [];
   const untypedSvcs = new Map();
   for (const c of A.calls) {
@@ -999,6 +1236,19 @@ export function evaluate(A, B) {
     }
     if (!table.has(c.method)) missingMethods.push({ ...c });
   }
+  return { missingMethods, untypedSvcs };
+}
+
+export function evaluate(A, B) {
+  const blessedValues = new Set(A.blessedValues);
+  const untracked = untrackedServiceNames(A, B, blessedValues);
+  const s2fail =
+    untracked.length > UNTRACKED_BASE || untracked.some((u) => !KNOWN_UNTRACKED.includes(u.name));
+  const missingEvents = [...new Set(A.events.map((e) => e.name))]
+    .sort()
+    .filter((n) => !B.events.has(n));
+  const r2fail = missingEvents.length > 0;
+  const { missingMethods, untypedSvcs } = scanMethodCalls(A, B);
   const r4fail = missingMethods.length > 0;
   const s1fail = A.dynamics.length > DYN_BASE;
   const s3fail = A.cascades.length > 0;
@@ -1046,56 +1296,80 @@ export function evaluate(A, B) {
   };
 }
 
-export function formatReport(A, B, R) {
-  const L = [];
-  L.push(
+/** A 侧与 B 侧的两行抬头（各面的派生规模与基线规模）。 */
+function reportHeader(A, B) {
+  return [
     `upstream-contract-warn: A 侧派生（字面量加单跳；动态 ${A.dynamics.length}，透传 ${A.forwarding.length}，祝福 ${A.blessed.length}，级联 ${A.cascades.length}）`,
-  );
-  L.push(
     `upstream-contract-warn: B 侧基线（${B.peers.length} 上游包锁定 ${[...B.versions.values()].map((v) => v.version).join(",")}，${B.files} 声明文件，服务 ${B.services.size}，事件 ${B.events.size}，不透明 ${B.opaque}）`,
-  );
+  ];
+}
+
+/** 跳过项的两张具名清单：透传与祝福，都只列示不判红。 */
+function skipListLines(A) {
+  const L = [];
   for (const f of [...A.forwarding].sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
     L.push(`upstream-contract-warn: 透传 ${f.verb}（${f.rel}:${f.line}，${f.why}，只列示）`);
   }
   for (const b of [...A.blessed].sort((a, b2) => (a.rel < b2.rel ? -1 : 1))) {
     L.push(`upstream-contract-warn: 祝福 ${b.verb}（${b.rel}:${b.line}，${b.name}，不对 B 断言）`);
   }
+  return L;
+}
+
+/** S1 与 S2 两行：跳过量的基线对照（S2 之前，S3 之前插 S2 的具名明细）。 */
+function skipThresholdLines(A, R) {
   const dynSites = A.dynamics.map((d) => `${d.rel}:${d.line}`).sort();
-  L.push(
+  return [
     `upstream-contract-warn: S1 动态 ${A.dynamics.length}（基线 ${DYN_BASE}）${R.s1fail ? "FAIL" : "OK"}：${dynSites.join("，") || "无"}`,
-  );
-  L.push(
     `upstream-contract-warn: S2 无类型服务 ${R.untracked.length}（基线 ${UNTRACKED_BASE}，跟踪锚：${TRACKING_ANCHOR}）${R.s2fail ? "FAIL" : "OK"}`,
-  );
-  for (const u of R.untracked) {
-    const methods = [
-      ...A.calls.filter((c) => c.svc === u.name).map((c) => c.method),
-      ...A.svcCalls.filter((c) => c.svc === u.name).map(() => "(直接调用)"),
-    ];
-    const uniq = [...new Set(methods)].sort();
-    const tracking = KNOWN_TRACKING[u.name] ?? "无登记（新名，FAIL 依据）";
-    L.push(
-      `upstream-contract-warn:   - ${u.name}｜${u.sites.join("，")}｜${u.count} 处｜R4-lite 归属：${uniq.length > 0 ? uniq.join("、") : "无直接调用"}｜跟踪：${tracking}`,
-    );
-  }
-  L.push(`upstream-contract-warn: S3 级联 ${A.cascades.length}（须零）${R.s3fail ? "FAIL" : "OK"}`);
-  L.push(
+  ];
+}
+
+/** 一个无类型服务的归属行：调用点、R4-lite 归属方法、跟踪注释指针。 */
+function untrackedLine(A, u) {
+  const methods = [
+    ...A.calls.filter((c) => c.svc === u.name).map((c) => c.method),
+    ...A.svcCalls.filter((c) => c.svc === u.name).map(() => "(直接调用)"),
+  ];
+  const uniq = [...new Set(methods)].sort();
+  const tracking = KNOWN_TRACKING[u.name] ?? "无登记（新名，FAIL 依据）";
+  return `upstream-contract-warn:   - ${u.name}｜${u.sites.join("，")}｜${u.count} 处｜R4-lite 归属：${uniq.length > 0 ? uniq.join("、") : "无直接调用"}｜跟踪：${tracking}`;
+}
+
+function untrackedLines(A, R) {
+  return R.untracked.map((u) => untrackedLine(A, u));
+}
+
+/** S3 与三条断言（R1/R2/R4-lite）的汇总行。 */
+function assertionLines(A, R) {
+  return [
+    `upstream-contract-warn: S3 级联 ${A.cascades.length}（须零）${R.s3fail ? "FAIL" : "OK"}`,
     `upstream-contract-warn: R1 服务 ${R.r1fail ? "FAIL" : "OK"}（消费 ${A.services.filter((s) => s.verb !== "provide").length} 名，未命中 ${R.untracked.length}）`,
-  );
-  L.push(
     `upstream-contract-warn: R2-cordis 事件 ${R.r2fail ? "FAIL" : "OK"}（派生 ${A.events.length} 名，未命中 ${R.missingEvents.length}${R.missingEvents.length > 0 ? "：" + R.missingEvents.join("，") : ""}）`,
-  );
-  L.push(
     `upstream-contract-warn: R4-lite 方法 ${R.r4fail ? "FAIL" : "OK"}（调用 ${A.calls.length + A.svcCalls.length} 处，未命中 ${R.missingMethods.length}，无类型服务 ${R.untypedSvcs.length}）`,
-  );
+  ];
+}
+
+/** R4-lite 的两类缺口明细：已定型服务缺方法、无类型服务清单。 */
+function gapLines(R) {
+  const L = [];
   for (const m of R.missingMethods)
     L.push(`upstream-contract-warn:   - 缺方法 ${m.svc}.${m.method}（${m.rel}:${m.line}）`);
   for (const [svc, sites] of R.untypedSvcs)
     L.push(`upstream-contract-warn:   - 未定型服务 ${svc}（${sites.join("，")}）`);
-  L.push(
-    `upstream-contract-warn: 全覆盖（A 侧 ${R.accounted} 条全部分类：断言、跳过具名、透传、祝福、inventory，零静默丢弃）`,
-  );
   return L;
+}
+
+export function formatReport(A, B, R) {
+  return [
+    ...reportHeader(A, B),
+    ...skipListLines(A),
+    ...skipThresholdLines(A, R),
+    ...untrackedLines(A, R),
+    ...assertionLines(A, R),
+    ...gapLines(R),
+    `upstream-contract-warn: 全覆盖（A 侧 ${R.accounted} 条全部分类：断言、跳过具名、透传、祝福、inventory，零静默丢弃）`,
+  ];
 }
 
 function loaderOfFile(file) {
