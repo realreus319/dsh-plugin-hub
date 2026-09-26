@@ -1160,7 +1160,7 @@ it("client 产物包含 0.1.7-rc.2 plugins.row.config canonical identity 契约"
   const clientSrc = readFileSync(new URL("../../lib/client.js", import.meta.url), "utf8");
   expect(clientSrc, "客户端产物注册 plugins.row.config").toContain("plugins.row.config");
   expect(clientSrc, "canonical bundle package 已入产物").toContain("@wingsky-1/dsh-mcp-manager");
-  expect(clientSrc, "canonical row id 已入产物").toContain("ui-dsh-mcp-manager");
+  expect(clientSrc, "canonical row id 已入产物").toContain("dsh-mcp-manager");
   expect(clientSrc, "客户端产物声明 configForms 注入面").toContain("configForms");
 });
 
@@ -2967,7 +2967,7 @@ it("config POST 经 apply 注入 settings：update 保留 this 不再 400（回�
   const settingsStub = {
     // 接缝经 describe 活读（闭包读当前 scopeValue，写后读回新值）。
     describe() {
-      return [{ ns: "ui-dsh-mcp-manager", value: { ...scopeValue }, revision: 0 }];
+      return [{ ns: "dsh-mcp-manager", value: { ...scopeValue }, revision: 0 }];
     },
     async write(ns: string, patch: unknown) {
       writeNamespaces.push(ns);
@@ -3028,9 +3028,7 @@ it("config POST 经 apply 注入 settings：update 保留 this 不再 400（回�
     expect(write.state.status, "settings.update 以正确 this 调用 → 写路由 200（不再 400）").toBe(
       200,
     );
-    expect(writeNamespaces, "只向 canonical settings namespace 写入").toEqual([
-      "ui-dsh-mcp-manager",
-    ]);
+    expect(writeNamespaces, "只向 canonical settings namespace 写入").toEqual(["dsh-mcp-manager"]);
     const written = JSON.parse(write.state.body);
     expect(written.position).toBe("bottom-right");
     expect(written.offsetX).toBe(12);

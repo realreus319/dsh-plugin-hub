@@ -129,9 +129,9 @@ session cookie), letting LAN devices enter without manual steps. Trade-offs and 
     answer whether upstream has drifted. The settings card also shows a persistent four-state
     verdict line, but only while the card is mounted (see the next item).
   - **Known limitation (both fault states are unreachable on the page)**: on the target dsh
-    `0.1.7-rc.2`, the card is registered through `configForms.whileServed(["ui-dsh-lan-proxy"])`
+    `0.1.7-rc.2`, the card is registered through `configForms.whileServed(["dsh-lan-proxy"])`
     and the keyed `plugins.row.config` slot. Its canonical row id / settings namespace is
-    `ui-dsh-lan-proxy`, and its row key is `@wingsky-1/dsh-lan-proxy#ui-dsh-lan-proxy`.
+    `dsh-lan-proxy`, and its row key is `@wingsky-1/dsh-lan-proxy#dsh-lan-proxy`.
     The row exists only while the Host serves that namespace; when a non-loopback page's settings
     surface is reduced to memory scope, the namespace is absent, so the row and card are not
     mounted. The crux is that **the same `isLoopback` signal decides both whether the card mounts
@@ -202,29 +202,13 @@ Configuration page: **Plugin Manager → dsh-lan-proxy → Configure** (saved ch
 ### Configuration storage (single channel)
 
 - All configuration lives in the dsh official settings store (the
-  `ui-dsh-lan-proxy` canonical namespace); the host owns persistence. The
+  `dsh-lan-proxy` canonical namespace); the host owns persistence. The
   composition-layer `cordis.patch.yml` config acts as the base layer. Hot reload is
   driven by the official `settings/document-updated` event — no restart needed.
 
-#### RC7 legacy settings-section migration
+#### Settings namespace
 
-DSH 0.1.7-rc.2 renames the old `~/.dsh/settings.yaml` to
-`settings.yaml.imported`. That file is an audit copy of the consumed legacy
-document, not the active configuration source; do not copy the whole imported
-file into a profile. Editable plugin fields are migrated into the active profile's
-`~/.dsh/profiles/<profile>/cordis.patch.yml` under the canonical
-`ui-dsh-lan-proxy` id.
-
-The automatic migration consumes only fields accepted by the current Config schema
-from the old `dsh-lan-proxy` section, with
-`settings.yaml.imported < settings.yaml < current canonical user`. The retired
-self-managed `config.json`, unknown top-level keys, and other deprecated fields
-are not written to the canonical patch. Completion is recorded by
-`settings.migrated` version `1` in the plugin-private directory. A
-`settings.migrated.pending` receipt is created before the canonical write and
-promoted after success; unknown failures finalize the marker without replaying
-old values, so a later DSH `unset` cannot be undone; only an explicit revision
-conflict clears the receipt for retry.
+The DSH importer consumes the same-id `dsh-lan-proxy` section directly; this plugin does not run a second namespace migration. `settings.yaml.imported` is an audit copy of the consumed document and must not be copied wholesale.
 
 <details>
 <summary>Legacy config.json migration</summary>
@@ -458,7 +442,7 @@ Tests are maintained by layer under `test/{unit,integration,e2e,client}/`. Unit 
 | `httpCompressLevel` | `1` (0-3) | `1` | Not declared |
 | `wsCompressPaths` / `wsDeflatePolicy` / `tlsCertFile` / `tlsKeyFile` | `["/api/remote.mux"]` / `{browser:true, uaDeny:[iPhone,iPad,iPod]}` / no default | `["/api/remote.mux"]` / no such key / `""` | Not declared |
 
-Host defaults come from `DEFAULT_OPTIONS` in `src/server/shared/defaults.ts` and `DEFAULT_DEFLATE_POLICY` in `src/server/shared/deflate.ts`, applied via `Config` / `DEFAULT_CONFIG` in `src/server/config/impl/model.ts`; client defaults come from `DEFAULTS` in `src/client/shared/defaults.ts`; `cordis.patch.yml` (`ui-dsh-lan-proxy`) carries no `config` on either the standalone or aggregate row. `injectToken` on is equivalent to trusting the whole LAN, and `ownsHostCompat` on declares `ownsHost` to non-loopback pages; see "Security Model" for details. The code above is the single source of truth; where docs and code disagree, the code prevails.
+Host defaults come from `DEFAULT_OPTIONS` in `src/server/shared/defaults.ts` and `DEFAULT_DEFLATE_POLICY` in `src/server/shared/deflate.ts`, applied via `Config` / `DEFAULT_CONFIG` in `src/server/config/impl/model.ts`; client defaults come from `DEFAULTS` in `src/client/shared/defaults.ts`; `cordis.patch.yml` (`dsh-lan-proxy`) carries no `config` on either the standalone or aggregate row. `injectToken` on is equivalent to trusting the whole LAN, and `ownsHostCompat` on declares `ownsHost` to non-loopback pages; see "Security Model" for details. The code above is the single source of truth; where docs and code disagree, the code prevails.
 
 ## License
 
