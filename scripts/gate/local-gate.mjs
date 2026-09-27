@@ -22,7 +22,17 @@
  *
  * 用法：
  *   node scripts/gate/local-gate.mjs [--tier changed|pr|full] [--base <ref>] [--dry-run] [--with-coverage]
- * 退出码：0 = 全部通过；1 = 某步失败（首个失败即停，摘要列出全部已跑步骤的 exit code）。
+ * 退出码（三态；语义的唯一事实源是 AGENTS.md 的门禁一节，本文件不复述）：
+ *   0 = 全部通过；
+ *   1 = 某步**按设计判红**（结论可信：改动确实不达标；首个失败即停，摘要列出全部已跑步骤的 exit code）；
+ *   2 = **门禁故障，不可信 ⇒ 禁止合并**——子进程压根没起来（命令不存在、权限、cwd 缺失）或被信号
+ *       杀死（SIGKILL / OOM）。成因逐字打进判词（`res.error` / `res.signal`），见 stepFault。
+ * 1 与 2 必须分得开，否则「门禁自己坏了」会被读成「改动确实不达标」：这类故障恰恰最复现不出来。
+ * 与 #875 那两次 exit 1 事故**是否同源，属推测、未证实**：两次事故没有当时日志，排查时可通向的
+ * 通道至少三条——① 真实判红、只是退出行被截断；② `res.status ?? 1` 兜底（子进程压根没起来或被
+ * 信号杀死）；③ **子门禁自身 exit 2 被 main 的 return 折成 1**（旧实现对任何非零都收 1，故 ③ 与 ②
+ * 无关、极易被误排除，而本仓 fail-closed 闸不少、它并不冷门；本次一并修掉）。属实的是可复现性
+ * 事实本身——定向复跑 8 次与 14 次全绿，既复现不出来也无从定位是哪一步。
  */
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -147,7 +157,15 @@ function main(argv) {
     return 0;
   }
 
-  return logSummary(steps, runSteps(steps)) ? 1 : 0;
+  const { failed, fault } = logSummary(steps, runSteps(steps));
+  // 门禁故障走唯一出口（forbid-raw-exit2 的口径）：判词带 `::error::` 前缀、可检索，且 exit 2
+  // 绝不与判红共用出口。放在摘要之后是刻意的——先看清「哪一步、什么原因」，再收口。
+  if (fault) {
+    failClosed(
+      `[local-gate] 步骤「${fault.label}」门禁故障：${fault.detail} —— 结论不可信，禁止合并（不得读成判红）`,
+    );
+  }
+  return failed ? 1 : 0;
 }
 
 /** 本次变更文件集与包面计划；changed 档取不到 diff 基准时按全量处理（fail-closed）。 */
@@ -217,7 +235,61 @@ function logPlan({ tier, escalated, effectiveTier, base, files, plan }) {
   }
 }
 
-/** 顺序执行步骤表，首个非零退出即停（fail-fast），返回已跑步骤的 exit code。 */
+/**
+ * 单步的退出语义分类：`status` 为 null 的两种成因**都不是判红**。
+ *
+ * spawnSync 的 `status` 为 null 有两个互不相同的成因，都属「门禁自己坏了」：
+ *   - `res.error`  非空：子进程压根没起来（命令不存在 / 无执行权限 / cwd 缺失）——判据从未运行；
+ *   - `res.signal` 非空：起来了但被信号杀死（SIGKILL / OOM / 外部 kill）——判据跑到一半没了。
+ * 二者都曾被 `res.status ?? 1` 兜底成 1，而 1 的语义是「结论可信、改动确实不达标」：门禁故障被
+ * 谎报成可信判红，读者既无从复现也无从定位是哪一步。
+ * 这与 #875 那两次 exit 1 事故**可能同源，属推测、未证实**——两次事故无当时日志，可通向的通道至少
+ * 三条：① 真实判红、只是退出行被截断；② 上面的 `res.status ?? 1` 兜底；③ 子门禁自身 exit 2 被 main
+ * 的 return 折成 1（与 ② 无关，排查时极易被误排除，本次一并修掉）。本文件不把它当结论，也不据此
+ * 收窄判据。
+ * `status` 既为 null 又无 error / signal（不该发生）同样 fail-closed——成因不明即不可信。
+ *
+ * 另有一类不是 status=null 的故障：子门禁自己 exit 2（它已按三态声明自己不可信），同样上收。
+ *
+ * 返回 `{ kind, detail }`：`detail` 逐字带上 `res.error` / `res.signal` 的实际内容，使判词可检索
+ * （「是被杀的还是判红」不必再翻日志猜）。该步正常退出（含判红）时返回 null。
+ */
+function stepFault(res) {
+  // 子门禁自己以「门禁故障」结案：聚合器绝不把它降格成 1（= 判红可信）。#843 的真实事故正是
+  // exit 2 被读成「判据按设计判红」并汇报为判决生效；本层若照抄 1，那条纪律在本地层同样落空。
+  if (res.status === 2) {
+    return { kind: "exit2", detail: "子门禁自身以门禁故障结案（exit 2）" };
+  }
+  if (res.status !== null) return null;
+  return { kind: faultKind(res), detail: faultDetail(res) };
+}
+
+/** status=null 时的成因归类：压根没起来（spawn）/ 被信号杀死（signal）/ 两者兼有 / 成因不明。 */
+function faultKind(res) {
+  if (res.error && res.signal) return "spawn+signal";
+  if (res.error) return "spawn";
+  if (res.signal) return "signal";
+  return "unknown";
+}
+
+/** 判词：逐字带上 res.error / res.signal 的实际内容，使「是被杀的还是判红」在日志里可检索。 */
+function faultDetail(res) {
+  const causes = [];
+  if (res.error) {
+    causes.push(
+      `spawn 失败：${res.error.message ?? String(res.error)}（code=${res.error.code ?? "n/a"}）`,
+    );
+  }
+  if (res.signal) causes.push(`被信号杀死：signal=${res.signal}`);
+  if (causes.length === 0)
+    causes.push("status=null 且无 signal / error —— 成因不明，按门禁故障处理");
+  return causes.join("；");
+}
+
+/**
+ * 顺序执行步骤表，首个非零退出即停（fail-fast），返回已跑步骤的结果。
+ * 每项为 `{ label, code, fault }`：`fault` 非 null 即门禁故障（code 记 2），与判红分开。
+ */
 function runSteps(steps) {
   const results = [];
   for (const step of steps) {
@@ -225,11 +297,17 @@ function runSteps(steps) {
       `\n[local-gate] ▶ ${step.label}\n[local-gate]   ${step.cmd ?? PNPM} ${step.args.join(" ")}`,
     );
     const res = spawnSync(step.cmd ?? PNPM, step.args, { cwd: ROOT, stdio: "inherit" });
-    const code = res.status ?? 1;
-    results.push({ label: step.label, code });
+    const fault = stepFault(res);
+    // 记录里的 code 取 2 而非 res.status（故障步的 res.status 是 null）：null 落进记录是雷——
+    // 任何后续按 `code !== 0` 或按数值解释它的消费者都会读到「无退出码」这一假象。
+    // exit 2 的对外出口在 main 的 failClosed，不依赖这里的取值（logSummary 也把故障步移出 exit= 栏）。
+    const code = fault ? 2 : res.status;
+    results.push({ label: step.label, code, fault });
     if (code !== 0) {
       console.error(
-        `\n[local-gate] ✗ ${step.label} 退出码 ${code} —— 后续步骤不再执行（fail-fast）`,
+        fault
+          ? `\n[local-gate] ✗ ${step.label} 门禁故障（不可信 ⇒ 禁止合并）：${fault.detail} —— 后续步骤不再执行（fail-fast）`
+          : `\n[local-gate] ✗ ${step.label} 退出码 ${code} —— 后续步骤不再执行（fail-fast）`,
       );
       break;
     }
@@ -237,15 +315,36 @@ function runSteps(steps) {
   return results;
 }
 
-/** 打印执行摘要；返回是否失败（供 main 决定退出码）。 */
+/**
+ * 打印执行摘要；返回 `{ failed, fault }` 供 main 决定退出码。
+ *
+ * 「判红」与「门禁故障」分两栏：同一条 `exit=` 列表里混着两种性质相反的结论，读者就得先猜
+ * exit 1 到底是「改动不达标」还是「门禁自己坏了」——而这两种的处置完全相反（前者改代码，
+ * 后者禁止合并并开 P0）。故障步因此不进 `exit=` 列表，单列一栏并带上成因。
+ */
 function logSummary(steps, results) {
+  const faults = results.filter((r) => r.fault !== null);
+  const exited = results.filter((r) => r.fault === null);
   console.log("\n[local-gate] 执行摘要：");
-  for (const r of results) console.log(`  exit=${r.code}  ${r.label}`);
+  for (const r of exited) console.log(`  exit=${r.code}  ${r.label}`);
+  if (faults.length > 0) {
+    console.log("[local-gate] 门禁故障（结论不可信 ⇒ 禁止合并，与上面的判红不同栏）：");
+    // 连记录里的 code 一起打：故障步不在 exit= 栏，不打出来就无从核对它记的是 2 而不是 null。
+    for (const r of faults) {
+      console.log(
+        `  fault=${r.fault.kind}  ${r.label} —— ${r.fault.detail}（记录 code=${r.code}）`,
+      );
+    }
+  }
   const skipped = steps.length - results.length;
   for (const s of steps.slice(results.length)) console.log(`  exit=skip  ${s.label}`);
   const failed = results.some((r) => r.code !== 0);
   if (skipped > 0) console.log(`[local-gate] 因首个失败跳过 ${skipped} 步`);
-  console.log(failed ? "[local-gate] 结果：FAIL" : "[local-gate] 结果：PASS");
+  // 判决词必须与上面两栏同向：故障时打 FAIL 会把「禁止合并 + 开 P0」读成「改代码」——
+  // 两者处置方向相反，#843 事故正是 agent 把 FAIL 读成了「判决已生效」。
+  if (faults.length > 0)
+    console.log("[local-gate] 结果：GATE-FAULT（不可信 ⇒ 禁止合并，按 P0 处理）");
+  else console.log(failed ? "[local-gate] 结果：FAIL" : "[local-gate] 结果：PASS");
   if (!failed) {
     // #742 阶段 3.2：本地三档都不跑变异，而 PR 上变异自 #742 阶段 1 起按命中切片**强制**跑
     // （打不打 gate:full 标签都跑）。不点明的话「本地 PASS」很容易被读成「CI 也会绿」，
@@ -257,7 +356,8 @@ function logSummary(steps, results) {
         "夜间 observe.yml）。全仓产物闸不属该缺口：pr / full 档内已跑完。本地 PASS 不等于 CI 绿。",
     );
   }
-  return failed;
+  const [first] = faults;
+  return { failed, fault: first ? { label: first.label, ...first.fault } : null };
 }
 
 function valueOf(argv, flag) {
