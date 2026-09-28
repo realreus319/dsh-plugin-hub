@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "覆盖率面（include / exclude / thresholds）的单一事实源（#733 计划项 3.4）。此前这三样内联在 vitest.config.ts 里：阈值与门槛混在配置代码里，改「算什么」与改「卡多严」在 diff 里长得一样，且 #722 的基线注释（分母 132 文件）与静态复算（223）差了 40% 无人能解释。现在：配置只 import 本文件，`vitest.config.ts` 不得再内联 thresholds/include/exclude 字面量（判据见 scripts/gate/verify-coverage-scope.mjs）。\n\ninclude 的两条口径是**两个面**，别混：#722 起的宿主端面是 `{ts,tsx}`；`.mjs` 是 #733 3.4 补进来的适配器实现（3 个文件、1756 行，此前既不在分母也不在变异面——变异面里它们被 mutation-topology.json 显式排除，属**两个面的不同口径**，理由见该文件的 coverageExcludes）。实测（本轮全量 cov，含 .mjs）：statements 79.70 / functions 81.86 / branches 72.30，对阈值 78/80/70 仍有余量；其中 deepseek-official.mjs 96.7%、opencode-go.mjs 95.5% 覆盖良好，zai-coding-cn.mjs 仅 13.9%（274 语句 / 26 函数）——**如实记录，不因此把它排除**：排除只会把缺口藏起来，而它已被 10 个测试文件引用，属可测面。\n\nexclude 条目是**结构化的**（pattern + reason + kind），不是裸 glob：kind 值域 type-only（无运行时代码的声明）/ not-source（src 下的非源码资源）/ pending-project（是源码，但要等某个 project 落地才能计）。**只有 pending-project 允许带 reviewBy**（临时豁免，自动进 collect-exemptions 的到期台账）与 exitCriteria（解除条件）；其它 kind 带上即判红——给永久事实编到期日只会逼出「永不续期」的假条目。pattern 命中 0 个物理文件即判红（条目腐烂）。",
+  "note": "覆盖率面（include / exclude / thresholds）的单一事实源（#733 计划项 3.4）。此前这三样内联在 vitest.config.ts 里：阈值与门槛混在配置代码里，改「算什么」与改「卡多严」在 diff 里长得一样，且 #722 的基线注释（分母 132 文件）与静态复算（223）差了 40% 无人能解释。现在：配置只 import 本文件，`vitest.config.ts` 不得再内联 thresholds/include/exclude 字面量（判据见 scripts/gate/verify-coverage-scope.mjs）。\n\ninclude 的两条口径是**两个面**，别混：#722 起的宿主端面是 `{ts,tsx}`；`.mjs` 是 #733 3.4 补进来的适配器实现（3 个文件、1756 行，此前既不在分母也不在变异面——变异面里它们被 mutation-topology.json 显式排除，属**两个面的不同口径**，理由见该文件的 coverageExcludes）。实测（本轮全量 cov，含 .mjs）：statements 79.70 / functions 81.86 / branches 72.30，对阈值 78/80/70 仍有余量；其中 deepseek-official.mjs 96.7%、opencode-go.mjs 95.5% 覆盖良好，zai-coding-cn.mjs 仅 13.9%（274 语句 / 26 函数）——**如实记录，不因此把它排除**：排除只会把缺口藏起来，而它已被 10 个测试文件引用，属可测面。\n\npending-project 的 exitCriteria 口径（#T1A）：**不得**写「有了直连判据」这类布尔条件——它被一条 import 就饱和（float.ts 早有 client-float-pure.test.ts 直连，却 85% 的行未被执行），会让豁免在真实条件未达成时被删掉。解除条件一律是**覆盖水位与变异面同时成立**：本文件 lines 与 branches 达到 thresholds 的同名键（派生自本文件 thresholds，故收紧阈值即收紧豁免面），**且**本文件进入 mutation-topology 的 mutate 面。**「传递覆盖」不算达标，水位单条也不够**——实测（量化日 2026-09-28，探针为改实现后跑 dsh-mcp-manager 全量测试）：locales.ts 水位 100%/100%、dom.ts 水位 94.44%/76.92%，但把 locales.ts 的 4 个字典值改成乱码、把 dom.ts 的 pangu 恒等化并把 el 的 class 专用通道改走 setAttribute 之后，全部 1520 个测试**仍全绿**（exit 0）——覆盖率只证明代码被执行过，不证明任何断言会因实现改错而打红（locales.ts 的 100% 更是唯一运行时 importer 的顶层 import 造成的「加载即满」）。对照组：core/session.ts 把未知帧阈值 2 改成 99 会被 client-context-s2.test.ts 打红，它有真信号，本 PR 据此删它。为何水位不含 functions：函数**计数**比率与「多少代码被执行」不同量纲（panel.ts 88.52% lines 却只有 73.68% functions，而它并不在豁免里——本仓既有实践并不要求豁免文件的 functions 达 80），拿它当门槛比既有实践更严，还会把「多小函数」的文件判死。各条 reason 里的百分比是**量化日快照**（只说明当时的排期位置，不作解除依据），到期复看由 reviewBy 驱动。",
   "include": [
     "packages/*/src/**/*.{ts,tsx}",
     "packages/*/src/**/*.mjs",
@@ -39,106 +39,98 @@
       "since": "#769"
     },
     {
-      "pattern": "packages/dsh-notifier/src/client/**/*.tsx",
+      "pattern": "packages/dsh-notifier/src/client/{index.tsx,settings/channels/*.tsx,settings/panes/*.tsx,settings/parts/{kind-icons,rows}.tsx}",
       "kind": "pending-project",
-      "reason": "notifier 客户端的渲染面（13 个 .tsx，含 1574 行的 index.tsx）：同目录下的纯 .ts 模块已由直连判据（test/client-unit/** 与 test/client-dom/**）覆盖并计入分母，故本条只排除 JSX 面——这是「按包按面收窄」而不是整体豁免的示范。react 18 运行时与渲染 harness（@testing-library/react）已由 #769 落进 root devDeps，apply 生命周期（test/client-dom/apply-lifecycle.test.ts）也已有直连判据；仍缺的是组件级渲染分支的判据（#769 目标 3 组件化尚在排队），.tsx 面覆盖率仍接近 0，计入分母只会稀释全局值。",
-      "exitCriteria": "组件级渲染判据落地、.tsx 面覆盖率不再稀释全局值后，删除本条并一次性重新基线化阈值",
+      "reason": "notifier 客户端的渲染面**余下部分**（11 个 .tsx，含 1958 行的 index.tsx；全包 src/client 下 .tsx 共 14 个）。同目录下的纯 .ts 模块已由直连判据（test/client-unit/** 与 test/client-dom/**）覆盖并计入分母，故本条只排除 JSX 面——这是「按包按面收窄」而不是整体豁免的示范。react 18 运行时与渲染 harness（@testing-library/react）已在 root devDeps，组件级渲染判据也已落地：parts/controls.tsx、parts/diagnostics.tsx、parts/status.tsx 三个文件各由 test/client-dom 下同名判据直连，**故本条按文件收窄，把这三个移出通配、纳入分母**——旧措辞「仍缺组件级渲染判据、.tsx 面仍接近 0」已不成立。收窄不是据覆盖率数字定的，是据**变异探针**定的：三个文件各做一处会导致行为变化的最小改动后跑 dsh-notifier 全量测试（79 文件 / 1391 用例），三个全部打红（controls 改 numInput 空串守卫、diagnostics 互换 granted/denied 文案、status 移除 padTime 零填充）；同一手法对同目录的 parts/rows.tsx 改判定阈值则全绿（exit 0），证明该探针能区分有无断言信号，故 rows.tsx 与其余 8 个文件仍留在本条内。判词与探针纪律见本文件 note 的「传递覆盖不算达标」段。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本条 pattern 命中的 11 个 .tsx 的 lines 与 branches 均不低于本文件 `thresholds` 的同名键——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 这些文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。收窄后的 pattern 是逐文件枚举而非通配：新 .tsx 落进本条范围外时会被 verify-coverage-scope 的面完整性判据判红（未分类即静默逃逸），须显式决定归属，不得靠「没写进清单」默认豁免。",
       "since": "#769",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/core/api.ts",
       "kind": "pending-project",
-      "reason": "mcp-manager 客户端按面收窄（#947 首个直连判据：panel aria-modal）：本文件尚无直连判据，计入分母只稀释阈值。panel.ts 与 state.ts 已有 test/client-dom 判据并计入分母，其余文件随判据落地逐个移出本清单（抄 notifier #769 按面收窄先例）。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "mcp-manager 客户端按面收窄（#947 首个直连判据：panel aria-modal）：本文件**确无**直连判据（量化日 2026-09-28：lines 66.66% / branches 43.47%），计入分母会稀释阈值。panel.ts 与 state.ts 已有 test/client-dom 判据并计入分母，其余文件随**覆盖水位达标**逐个移出本清单（抄 notifier #769 按面收窄先例）。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/core/constants.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：**已有**直连判据（test/unit/cross-end-lock.test.ts 导入），但只触及少数常量；statusDot 被 float/float.ts:259 调用却无任何判据（量化日 2026-09-28：lines 60% / branches 0%）。旧措辞「有了直连判据即删」在本文件上已被证伪。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/core/dom.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：确无直连判据。水位看似达标（量化日 2026-09-28：lines 94.44% / branches 76.92%），但**变异探针实测零断言信号**——把 `pangu` 恒等化（直接返回原文）、并把 `el` 的 class 专用通道改走 setAttribute 后，dsh-mcp-manager 全部 1520 个测试仍全绿（exit 0）。这 94.44% 是 float/panel/quick-add 渲染路径的**顺带执行**，不是判据。**故保留本条**：水位达标但零变异信号者不得进入分母。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/core/i18n.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
-      "since": "#947",
-      "reviewBy": "2027-03-31"
-    },
-    {
-      "pattern": "packages/dsh-mcp-manager/src/client/core/session.ts",
-      "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：确无直连判据，唯一导出 tStatus 零执行（量化日 2026-09-28：lines 0% / branches 0%）；18 行的低成本高收益项。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/float/float.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：本文件 Esc 一行变更暂无直连判据（panel Esc 由 panel-aria-modal 覆盖），计入分母稀释阈值；后续为 float 补直连判据后删除本条。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：**已有**直连判据（test/client-unit/client-float-pure.test.ts 与 client-context-s2.test.ts），但只覆盖纯函数层；本文件 838 行里 DOM 渲染与装配部分无判据（量化日 2026-09-28：lines 14.92% / branches 23.37%）。旧措辞正是在这里会被误用成「已可删」。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/float/quick-add.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据（client-unit 仅覆盖其 guard 纯函数，不覆盖本文件整体）。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：**已有**直连判据（client-float-pure.test.ts 仅覆盖其 guard 纯函数，unit-summary-a3-guard.test.ts 覆盖 guard），不覆盖本文件整体（量化日 2026-09-28：lines 43.78% / branches 43.47%）。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/float/servers.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：**已有**直连判据（client-float-pure.test.ts / smoke.test.ts），但只覆盖纯函数层，DOM 渲染层未覆盖（量化日 2026-09-28：lines 23.84% / branches 18.82%）。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/index.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：**已有**直连判据（test/client-unit/client-context-s2.test.ts 导入并调用 apply），但 392 行里仅 20/186 语句被执行、144 行未覆盖（量化日 2026-09-28：lines 12.19% / branches 6.09%）。旧措辞「有了直连判据即删」在本文件上是**已实测的误判入口**——它会让 88% 未被执行的代码悄悄进入分母。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/locales.ts",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：尚无直连判据。",
-      "exitCriteria": "本文件有了直连 src 的判据后删除本条",
+      "reason": "同上（#947 按面收窄）：确无直连判据。100% / 100% 是**模块加载的假象**——唯一运行时 importer 是 src/client/index.ts:40 的顶层 import（core/constants.ts 只 import type，运行时擦除），字典全部是顶层 const 声明，加载即满。**变异探针实测零断言信号**：把 4 个字典值改成乱码后 dsh-mcp-manager 全部 1520 个测试仍全绿（exit 0）。纯数据字典但无任何判据钉住它，**故保留本条**。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键（80 / 70）——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
       "pattern": "packages/dsh-mcp-manager/src/client/settings/settings-card.tsx",
       "kind": "pending-project",
-      "reason": "同上（#947 按面收窄）：渲染面，等组件级渲染判据（抄 notifier .tsx 豁免口径）。",
-      "exitCriteria": "组件级渲染判据落地后删除本条",
+      "reason": "同上（#947 按面收窄）。**旧 reason「等组件级渲染判据」为假**：test/client-dom/settings-card.test.ts 早已直连 import 本文件（`../../src/client/settings/settings-card.tsx`）并用 render/fireEvent 驱动，水位 lines 95.23% / branches 85.18%（量化日 2026-09-28）。**变异探针实测两处均打红**（改实现后跑 dsh-mcp-manager 全量测试 53 文件 / 1520 用例）：① 保存按钮的 `disabled={saving}` 改成 `disabled={false}` → 1 条红，判词 `AssertionError: expected false to be true // Object.is equality`（用例「飞行中保存按钮禁用（saving 态），落地后恢复」），exit 1；② 成功/失败提示的 class 三元 `msg.ok ? \"dm-set-saved\" : \"dm-set-error\"` 两值互换 → 3 条红，判词 `AssertionError: expected 'dm-set-error' to be 'dm-set-saved' // Object.is equality` 等，exit 1。**故本条缺的不是判据，是第二条件**：本文件不在 `scripts/data/mutation-topology.json` 的任何 `mutate` 段内。探针是一次性测量（有人加一个没覆盖的函数，上面那两句照样成立），mutate 面登记才是持续执法——故按本轮确立的双条件规则，**保留本条**，不改 pattern。判词与探针纪律见本文件 note 的「传递覆盖不算达标」段。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本文件 lines 与 branches 均不低于本文件 `thresholds` 的同名键——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 本文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**①已成立**（量化日 2026-09-28 实测 lines 95.23% / branches 85.18%），**②尚未成立**——探针两处打红是本轮一次性测量，不构成持续执法，故不得据它删条。**水位单条也不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。",
       "since": "#947",
       "reviewBy": "2027-03-31"
     },
     {
-      "pattern": "packages/dsh-provider-usage/src/client/**",
+      "pattern": "packages/dsh-provider-usage/src/client/{core.ts,float-view.ts,history.tsx,index.tsx,locales.ts,trend-math.ts,settings/index.tsx,settings/providers.tsx,settings/settings-view.ts,settings/shared.ts,settings/ui.tsx,settings/usage.tsx,shared/contract.ts}",
       "kind": "pending-project",
-      "reason": "provider-usage 客户端（13 文件、约 4880 行，本仓最大的客户端面）：其 test/client 下的 4 个文件读产物，不直连 src。同上，计入分母只稀释阈值。",
-      "exitCriteria": "该包客户端重写、且有直连 src 的判据后删除本条并单独度量",
+      "reason": "provider-usage 客户端**余下部分**（13 个文件、4795 行；src/client 下计分文件共 16 个、8114 行，另 2 个 css.d.ts 与 style.css 由 type-only / not-source 两条单独分类。本仓最大的客户端面）。旧措辞「13 文件、约 4880 行」「test/client 下 4 个文件读产物、不直连 src」两处均与实测不符：test/client 下 8 个 .test.ts 里 6 个用 esbuild 即时打包**直连真 src**（client-routes / unit-detect / unit-float-view / unit-report-p0 / unit-settings-view / unit-trend-view），另 2 个（unit-fetch-timeout / unit-refresh-revalidate）是源码文本契约 + 子进程 worker 剧本，不直连 src。**故本条按文件收窄**：report.tsx、trend.tsx、report-helpers.ts 三个文件已由 test/client-dom（report-section / trend-section，直连 src）与 test/client（unit-report-p0，esbuild 直连 src）覆盖，纳入分母——依据同样是**变异探针**而非覆盖率数字：三处各做一处会导致行为变化的最小改动后跑 dsh-provider-usage 全量测试（47 文件 / 3656 用例），三个全部打红（report-helpers 把 defaultStructureHeader 的 daily 判据改成 monthly、report.tsx 删 onSave 里的 setBaseline、trend.tsx 把空态判定收紧成 p.empty && p.failed）。本仓实践不要求整包重写才可度量，故旧 exitCriteria 的「该包客户端重写」不作为解除条件。**如实记水位**：这三个文件进分母时并不达标（量化日 2026-09-28 实测 report-helpers.ts lines 79.38% / branches 65.21%、report.tsx 78.5% / 70.55%、trend.tsx 72.24% / 59.77%，均未到本文件 thresholds 的同名键）——收窄的依据是探针打红而非水位达标，把缺口显式摆进分母正是本仓立场（排除只会把缺口藏起来），且全局四项仍有余量。判词与探针纪律见本文件 note 的「传递覆盖不算达标」段。",
+      "exitCriteria": "删除条件（须**同时**成立）：① `pnpm cov` 产物里本条 pattern 命中的 13 个文件的 lines 与 branches 均不低于本文件 `thresholds` 的同名键——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严；`pnpm cov` 是既定执行点（CI 夜间班次与 `gate:full --with-coverage` 已恒跑），故无需新增负责人。② 这些文件已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。两项同时成立即删本条并一次性重新基线化阈值。收窄后的 pattern 是逐文件枚举而非通配：新文件落进本条范围外时会被 verify-coverage-scope 的面完整性判据判红（未分类即静默逃逸），须显式决定归属。",
       "since": "#769",
       "reviewBy": "2027-03-31"
     },
@@ -169,8 +161,8 @@
     {
       "pattern": "shared/client/**",
       "kind": "pending-project",
-      "reason": "跨包共享的客户端设施（ensure-style.js / i18n.js）：它们的测试在 scripts/test 下（node:test 面），不属于任何 vitest project，故 pnpm cov 跑不到这两个文件。",
-      "exitCriteria": "为这两个模块建 project，或把它们的测试移入 unit 层后删除本条",
+      "reason": "跨包共享的客户端设施（**源码是 .ts 不是 .js**——旧措辞写的 ensure-style.js / i18n.js 是 #1028 后续重构之前的事，同目录下的 .js 是 tsc 原地 emit 产物，已由 shared/**/*.js 那条 not-source 单独排除）：ensure-style.ts / i18n.ts 两个模块的判据在 scripts/test 下（shared-client-ensure-style.test.ts / shared-client-i18n.test.ts，由 node --test 跑、即 pnpm test:scripts），而 **vitest projects 的 include 恒带 packages/*/ 前缀**（由 $testLayers.layers 派生），故 shared/test 与 scripts/test 都不属于任何 vitest project，`pnpm cov` 永远收不到——实测 npx vitest run --project unit shared/test/config-shape.test.ts exit 1（vitest 打印 include: packages/*/test/unit/**/*.test.ts），而 node --test 同一文件 exit 0。**只搬测试位置不够**：各包 client-dom 判据 import 的是 shared/client/i18n.js（tsc 产物，被 not-source 排除），istanbul 计的是被 import 的那个文件，.ts 源因此仍是 0%。实测补上了这个洞：在某包 test/client-dom 用例里直接 import shared/client/ensure-style.ts，istanbul 立刻给出该文件的覆盖率（两条冒烟断言即得 lines 80.95% / branches 47.36%），即「直连 .ts 源」是可行且必要的条件。**「unit 层」的可判定定义见 docs/DEVELOPMENT.md「测试分层与变异面登记」下的同名小节**（两条同时满足：(A) 被某个 vitest project 收集 + (B) 直连 .ts 源而非 tsc 产物），旧 exitCriteria 的「建 project 或移入 unit 层」实为三选一（project / node:test / vitest 三种含义混用）且不可机械判定，已按该定义改写。",
+      "exitCriteria": "删除条件（须**同时**成立）：① 两个文件在 `pnpm cov` 产物里 lines 与 branches 均不低于本文件 `thresholds` 的同名键——**持续判据**，数字派生自同文件 thresholds 不另立第二份，收紧阈值本条随之变严。② 存在**直连 shared/client/*.ts 源**的判据并已进入 `scripts/data/mutation-topology.json` 某段的 `mutate`（判据已能杀死其变异体）。达成路径（不属解除条件，只供排期参考，成本高于「搬测试」）：在 $testLayers.layers 新增一层以收 shared/test，或把 shared 判据放进某包 test/<层>/ 下并同步该包 --min 与变异面登记。**水位单条不够**：可被「模块加载即执行」满足而不产生任何断言信号（locales.ts 100%、dom.ts 94.44% 即如此，两者的变异探针全绿），证据与判词见本文件 note 的「传递覆盖不算达标」段。",
       "since": "#769",
       "reviewBy": "2027-03-31"
     },

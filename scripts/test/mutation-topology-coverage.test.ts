@@ -51,6 +51,53 @@ const GENERATOR = join(ROOT, "scripts", "gate", "gen-stryker-conf.mjs");
 const VERIFY_DIR_IMPORTS = join(ROOT, "scripts", "gate", "verify-dir-imports.mjs");
 const TOPOLOGY_PATH = join(ROOT, "scripts", "data", "mutation-topology.json");
 
+/** 登记是不是对象（.mjs 的 isPlainObject 推断出 boolean 而非类型守卫，故本地收窄）。 */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * `coverageExcludes` 这个键出现在一份包登记的**任何**位置（包级 / testLayers 下 / 段里）。
+ *
+ * 唯一合法位置是 `testLayers` 下（见 mutation-topology.mjs 的 misplacedCoverageExcludesProblems：
+ * 写错位置不报错、不进派生 conf，整组条目就此静默离开取值面与形状校验面）。
+ */
+function coverageExcludeKeyWhere(pkgDef: Record<string, unknown>): string | null {
+  if (Object.hasOwn(pkgDef, "coverageExcludes")) return "包级";
+  if (isRecord(pkgDef.testLayers) && Object.hasOwn(pkgDef.testLayers, "coverageExcludes")) {
+    return "testLayers 下";
+  }
+  if (isRecord(pkgDef.segments)) {
+    for (const [segKey, segDef] of Object.entries(pkgDef.segments)) {
+      if (isRecord(segDef) && Object.hasOwn(segDef, "coverageExcludes")) return `段 "${segKey}" 里`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 派生口径：coverageExcludes 形状校验的**对象**取「登记里任何位置出现 `coverageExcludes` 键」的
+ * 包，按包名排序返回。
+ *
+ * 口径落在「键在场」而不是包名或条数上——包名清单与计数清单都是必须跟着代码走的漂移源，键在场是
+ * 形状事实。值为非数组（形状错误）也留在面内：否则形状错误会被派生层当「没登记」静默吃掉。
+ *
+ * 为什么是「任何位置」而不只是 `testLayers` 下（本用例自身实测过的退化）：只认 testLayers 下那个键时，
+ * 把某包整组条目挪到包级就会让该包**逐个**退出校验面，而载体自证只认「声明包数 == 0」这一种全局退化——
+ * 另三包仍在声明时 `declared.length > 0` 照常成立，形状校验一条都没少判却看不出（实测：4 个声明包全挪走
+ * 后本文件 31 条全绿）。把挪错位置的包留在面内，它才会被下面的位置断言点名。
+ */
+function declaredCoverageExcludePackages(topology: {
+  packages?: Record<string, unknown>;
+}): string[] {
+  const declared: string[] = [];
+  for (const [name, def] of Object.entries(topology.packages ?? {})) {
+    if (!isRecord(def)) continue;
+    if (coverageExcludeKeyWhere(def) !== null) declared.push(name);
+  }
+  return declared.sort();
+}
+
 test("P2 root-shared：真实拓扑精确登记 settings namespace 变异段", () => {
   const topology = JSON.parse(readFileSync(TOPOLOGY_PATH, "utf8"));
   assert.deepEqual(topology.$rootShared, {
@@ -230,34 +277,47 @@ test("F15 反证：落盘 conf 的 mutate 面与断言口径同源（含 coverag
   }
 });
 
-test("#773 R4：coverageExcludes 是 { pattern, reason, kind } 结构化条目（3 包共 14 条）", () => {
+/**
+ * coverageExcludes 的形状校验：**对象**是「每一个声明了 coverageExcludes 的登记包」（按上面的派生口径，
+ * 即键出现在登记任何位置），从拓扑派生，不手挑包名。
+ *
+ * 为什么对象必须是派生的（本条的由来）：一份手挑的包名清单是「必须跟着代码走的清单」，登记里
+ * 新增豁免的包（本轮实测即 dsh-lan-proxy 的 2 条）整段落空，而用例名与断言却声称覆盖全部登记包——
+ * 过度声称。此时形态回归对清单外的包恒绿：裸 glob / 缺 pattern / reason 过短 / 未知 kind 都打不
+ * 红它（已实测：把 dsh-lan-proxy 某条 kind 改成非法值、把另一条退化成裸字符串，本用例 30 条全绿）。
+ *
+ * 规模（每包条数、总条数）是**报告不是断言**：写死总数等于把清单复制进测试，于是下一次有意的登记
+ * 动作必须改测试代码——那既制造漂移源，又让「数量变了」在 diff 里被当成测试改动顺带溜过。
+ * 「加豁免必须是有意的登记动作」这条关切由谁接，写在本用例末尾的注释里。
+ */
+test("#773 R4：每个声明 coverageExcludes 的登记包都逐条过形状校验（对象派生，规模只报告）", (t) => {
   const topology = JSON.parse(readFileSync(TOPOLOGY_PATH, "utf8"));
-  // 规模断言：形状变更范围 14 条（dsh-mcp-manager 3 / dsh-notifier 5 / dsh-provider-usage 6）。
-  // notifier 是 5 而不是 4：原 `**/deps.ts` 一条拆成两条——7 个纯类型域出口 + 含运行时
-  // 实现的 system/deps.ts 单列（复核实测它转译后有运行时代码，不能与纯类型共用一条 reason）。
-  // mcp 是 3 而不是 1（#767 B0 + B2a-wire W8）：原 facade 条重估后保留（目标形态的门面转译后仍有
-  // 运行时代码，但只转调、不裁决，故不属 type-only）、新增目标树 `src/server/*/deps.ts` 的纯类型面
-  // 出口条，W8 再新增 `src/connection/runtime/deps.ts`（B2b 前首个落在 `src/<域>/` 顶层的 deps.ts，
-  // 该子层 mutate glob 全是显式文件，不登记就进 uncoveredSrcFiles）。
-  // wfp 包已随 #840 退役（拓扑里无该包条目），故不计入三包范围。
-  // 数量变化必须是有意的登记动作，不能靠 diff 顺带溜过。
-  // pu 6→5（#767 终轮收尾：共享层 placement-math.js 退役，两包自持实现；
-  // pu 的薄 facade coverageExcludes 条目随之删除，包内实现已在 pipeline 段 mutate 面内）。
-  // pu 5→6（#768 S2：server/upgrade/deps.ts 纯类型窄面（UpgradeDeps 三项）新增 type-only 条目；
-  // S3 新增 server/upgrade/interface.ts 复用既有 facade 条（**/interface.ts），不新增条目）。
-  const expected = { "dsh-mcp-manager": 3, "dsh-notifier": 5, "dsh-provider-usage": 6 };
+  const registered = Object.entries(topology.packages) as Array<
+    [string, { testLayers?: Record<string, unknown> }]
+  >;
+  const declaredNames = new Set(declaredCoverageExcludePackages(topology));
+  const declared = registered.filter(([name]) => declaredNames.has(name));
+  // 载体自证：派生集合为空 = 一条都没判，恒绿；这是判红不是跳过（与判据⑤⑥⑦ 同一纪律）。
+  // 它只兜**全局**退化；逐包退化由下面的位置断言兜住（两者不可互相替代，见派生口径的注释）。
+  assert.ok(
+    declared.length > 0,
+    "没有任何登记包声明 coverageExcludes（形状校验一条都没判，不得恒绿）",
+  );
 
-  const allReasons = [];
+  const allReasons: string[] = [];
+  const rows: string[] = [];
   let total = 0;
-  for (const [pkgName, count] of Object.entries(expected)) {
-    const pkgDef = topology.packages[pkgName];
-    const entries = pkgDef.testLayers.coverageExcludes;
-    assert.ok(Array.isArray(entries), `${pkgName} 的 coverageExcludes 必须是数组`);
+  for (const [pkgName, pkgDef] of declared) {
+    // 位置先判：条目写在 testLayers 之外时下面那条 Array.isArray 会以「必须是数组」的形态报错，
+    // 指不到真正的病根（键挪了地方，而不是类型不对）。
     assert.equal(
-      entries.length,
-      count,
-      `${pkgName} 的 coverageExcludes 条目数与登记不符（形状变更范围必须显式同步）`,
+      coverageExcludeKeyWhere(pkgDef),
+      "testLayers 下",
+      `${pkgName} 把 coverageExcludes 登记在了 testLayers 之外——唯一合法位置是 testLayers 下` +
+        `（门禁侧同一判据见 packageEntryProblems，判词：scripts/gate/mutation-topology.mjs）`,
     );
+    const entries = pkgDef.testLayers?.coverageExcludes;
+    assert.ok(Array.isArray(entries), `${pkgName} 的 coverageExcludes 必须是数组`);
     // 共享校验器：形状合法即零 problems（裸字符串 / 缺 pattern / reason 过短 / 未知 kind 都会红）
     assert.deepEqual(
       coverageExcludeProblems(pkgDef),
@@ -286,18 +346,33 @@ test("#773 R4：coverageExcludes 是 { pattern, reason, kind } 结构化条目�
       );
       allReasons.push(entry.reason);
     }
+    rows.push(`${pkgName}=${entries.length}`);
     total += entries.length;
   }
   assert.equal(
-    total,
-    14,
-    "coverageExcludes 共 14 条（#773 R4 的形状变更范围：notifier deps.ts 拆分后 5 条；#840 退役 wfp（13→12）；#767 B0 mcp 第 2 条（→13）；W8 connection/runtime/deps.ts 第 3 条（→14）；#767 终轮收尾删 pu 薄 facade 条（→13）；#768 S2 加 pu server/upgrade/deps.ts 条（→14））",
-  );
-  assert.equal(
     new Set(allReasons).size,
     allReasons.length,
-    "每条排除都是独立裁决，reason 不得复制同一句",
+    "每条排除都是独立裁决，reason 不得复制同一句（跨全部声明包去重）",
   );
+  // 规模是报告不是断言：`pnpm test:scripts` 的输出里能直接看到「谁、多少条」，
+  // 评审 diff 时不必去数，也就不必在测试里维护第二份计数。
+  t.diagnostic(
+    `coverageExcludes 登记面：${declared.length}/${registered.length} 个登记包声明，共 ${total} 条（${rows.join(" / ")}）`,
+  );
+
+  // 「数量变化必须是有意的登记动作」这条关切，去掉计数后机器还接得住多少（逐层如实，均已实跑）：
+  // 1) 形状层（本用例）：每条 entry 的 pattern/reason/kind、重复 pattern、复制 reason——机器化，且
+  //    对象是「每个声明包」，新增登记包不会再掉出校验面。
+  // 2) 有效裁剪层（既有判据⑦ `mutationFaceRatchetProblems`，gen-stryker-conf --check 跑）：新增一条
+  //    coverageExcludes 若真把在面文件挪出本分支的变异面，就是一次并集收缩，与 origin/main 比对即判红
+  //    （实测 exit 1）。唯一放宽通道是 gate-exemptions.json 里 gate=mutation-face 的台账条目——
+  //    「有意的登记动作」在机器上留下的痕迹正是这条台账，不需要测试再记一份计数。
+  // 3) 幽灵 glob（判据⑤ 存在性）：glob 在源码世界命中 0 个文件即判红（实测 exit 1）。
+  // 4) 不可机器化的一层：glob 命中磁盘上真实存在、但当前不在任何段正向面里的文件（例如
+  //    `!src/server/**/interface.ts`——服务端 8 个段的 mutate 都是显式文件，不含 interface.ts）。
+  //    这类「口径声明」判据⑤⑥⑦ 与形状校验全都看不见（实测 gen-stryker-conf --check exit 0 通过）：
+  //    机器无法区分「为将来形态兜底的有意声明」与「悄悄多加一条面不痛的排除」。改由 PR review
+  //    承接——它是四条里唯一需要人裁决的，形状/数量/裁剪三类回归已不再依赖它。
 });
 
 test("#773 R4 反证：形状不合法必须判红（裸字符串 / 缺 pattern / reason 空或过短 / 未知 kind）", () => {
@@ -343,6 +418,131 @@ test("#773 R4 反证：形状不合法必须判红（裸字符串 / 缺 pattern 
   assert.deepEqual(coverageExcludeProblems({ testLayers: { coverageExcludes: [valid] } }), []);
   // absent ≠ 空数组：未登记 coverageExcludes 的包不是形状错误
   assert.deepEqual(coverageExcludeProblems({ testLayers: {} }), []);
+});
+
+/**
+ * 本用例的「对象派生」这一层自身的反证：筛选口径落在「登记里该键在场」上，
+ * 不是包名、也不是条数。派生逻辑抽成纯函数后逐形态判红——派生写错（键名写死、只认真值、
+ * 漏了非数组形态、只认 testLayers 而漏掉挪错位置的）都会在这里被打红，而不是退化成静默少判几个包。
+ */
+test("#773 R4 反证：声明包派生口径（键在场即入面；非对象 / 无键都不入面；挪错位置仍入面）", () => {
+  // 判定落在「键在场」：值为非数组（形状错误）也必须入面，否则 shape 错误会被派生层静默吃掉。
+  assert.deepEqual(
+    declaredCoverageExcludePackages({
+      packages: {
+        "a-good": { testLayers: { coverageExcludes: ["!x"] } },
+        "b-nonarray": { testLayers: { coverageExcludes: "!x" } },
+        "c-emptyarray": { testLayers: { coverageExcludes: [] } },
+        "d-nokey": { testLayers: { other: 1 } },
+        e: { testLayers: { coverageExcludes: ["!x"] } },
+        f: {},
+        g: { testLayers: null },
+        h: { testLayers: "nope" },
+        i: null,
+        // 以下三种是「键在场但位置非法」：必须留在校验面内，由位置断言点名。只认 testLayers 下
+        // 那个键的话，它们会静默退出校验面（实测：四个声明包全挪走后本文件 31 条全绿）。
+        "j-pkglevel": { coverageExcludes: ["!x"], segments: { s: {} } },
+        "k-seglevel": { segments: { s: { coverageExcludes: ["!x"] } } },
+        "l-both": { coverageExcludes: ["!x"], testLayers: { coverageExcludes: ["!x"] } },
+        // testLayers 非对象时键仍可能在别处：只认「testLayers 是对象」的那一层会把它吃掉。
+        m: { testLayers: "nope", coverageExcludes: ["!x"] },
+      } as never,
+    }),
+    ["a-good", "b-nonarray", "c-emptyarray", "e", "j-pkglevel", "k-seglevel", "l-both", "m"],
+    "派生只认「登记是对象 + coverageExcludes 键在登记任何位置在场」；非数组/空数组是形状错误、位置非法是登记错误，两者都必须留在校验面内",
+  );
+  // 位置判词本身：三个非法位置各自说清「在哪」，对照组给出唯一合法位置。
+  assert.equal(coverageExcludeKeyWhere({ testLayers: { coverageExcludes: [] } }), "testLayers 下");
+  assert.equal(coverageExcludeKeyWhere({ coverageExcludes: [] }), "包级");
+  assert.equal(coverageExcludeKeyWhere({ segments: { s: { coverageExcludes: [] } } }), '段 "s" 里');
+  assert.equal(
+    coverageExcludeKeyWhere({ testLayers: {}, segments: { s: { excludes: [] } } }),
+    null,
+  );
+  // 对照组：无人声明即空集（真实拓扑里的空集由上一条用例的载体自证判红，不在此处静默放过）
+  assert.deepEqual(
+    declaredCoverageExcludePackages({ packages: { a: {}, b: { testLayers: {} } } }),
+    [],
+  );
+});
+
+/**
+ * P2-2 反证（E2E）：把 coverageExcludes 挪出 testLayers（挪到包级 / 段级）必须两道门禁都判红。
+ *
+ * 为什么必须单立一条 E2E：本条修复前的实测形态是**两道门禁双双 exit 0**——挪位置不报错，派生 conf
+ * 静默少出这些条目展开的全部 mutate 条目（实测 305 → 285），而形状校验面已不再看它们。单元面能证明
+ * 判词函数判红，证明不了判红真的接到了两个调用点上（gen-stryker-conf 的形状关与 verify-dir-imports 的
+ * `collectMutationSpecs` → `topologyProblems` 是两条独立通路）。
+ *
+ * fixture 用 `mkdtempSync` 隔离根，登记一份最小可派生拓扑：判据落在形状关上，故不要求 conf 已在盘。
+ */
+test("P2-2 反证：coverageExcludes 挪出 testLayers → gen-stryker-conf 与 verify-dir-imports 都判红", () => {
+  const valid = {
+    pattern: "!packages/fixture-pkg/src/client/**",
+    reason: "这是一条足够长的理由说明",
+    kind: "not-source",
+  };
+  const runBoth = (pkgDef: Record<string, unknown>) => {
+    const root = mkdtempSync(join(tmpdir(), "p2-2-misplaced-"));
+    try {
+      for (const [rel, content] of Object.entries({
+        "packages/fixture-pkg/src/a.ts": "export const a = 1\n",
+        "packages/fixture-pkg/src/client/ui.ts": "export const b = 2\n",
+      })) {
+        mkdirSync(dirname(join(root, rel)), { recursive: true });
+        writeFileSync(join(root, rel), content, "utf8");
+      }
+      mkdirSync(join(root, "scripts", "data"), { recursive: true });
+      writeFileSync(
+        join(root, "scripts", "data", "mutation-topology.json"),
+        `${JSON.stringify({ sharedDefaults: {}, packages: { "fixture-pkg": pkgDef } }, null, 2)}\n`,
+        "utf8",
+      );
+      const gen = spawnSync(process.execPath, [GENERATOR, "--check"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        env: { ...process.env, GEN_STRYKER_ROOT: root, GEN_STRYKER_BASE: "HEAD" },
+      });
+      const vdi = spawnSync(process.execPath, [VERIFY_DIR_IMPORTS, "--package", "fixture-pkg"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        env: { ...process.env, VERIFY_DIR_IMPORTS_ROOT: root },
+      });
+      return {
+        gen: { status: gen.status, out: `${gen.stdout ?? ""}${gen.stderr ?? ""}` },
+        vdi: { status: vdi.status, out: `${vdi.stdout ?? ""}${vdi.stderr ?? ""}` },
+      };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const segment = { mutate: ["packages/fixture-pkg/src/**/*.ts"], excludes: [] };
+
+  // 攻击形态：整组条目挪到包级。形状合法（是对象、键名对），只是位置不在 testLayers 下。
+  for (const [name, pkgDef] of Object.entries({
+    包级: { coverageExcludes: [valid], segments: { only: segment } },
+    段级: { segments: { only: { ...segment, coverageExcludes: [valid] } } },
+  })) {
+    const { gen, vdi } = runBoth(pkgDef);
+    assert.equal(gen.status, 1, `挪到${name}必须让 gen-stryker-conf 判红：\n${gen.out}`);
+    assert.match(gen.out, /coverageExcludes/, "判词要点名是 coverageExcludes 这一项");
+    assert.equal(vdi.status, 1, `挪到${name}必须让 verify-dir-imports 判红：\n${vdi.out}`);
+    assert.match(vdi.out, /coverageExcludes/, "判词要点名是 coverageExcludes 这一项");
+  }
+
+  // 对照组：同一个条目写在唯一合法位置 → 位置判据不得误报。
+  // （fixture 缺 conf/stryker 基线，gen 仍会因别的判据红，故只断言「位置判词不在输出里」。）
+  const ok = runBoth({ testLayers: { coverageExcludes: [valid] }, segments: { only: segment } });
+  assert.doesNotMatch(
+    ok.gen.out,
+    /coverageExcludes 只能写在|不认 coverageExcludes/,
+    `合法位置不得被判红（gen）：\n${ok.gen.out}`,
+  );
+  assert.doesNotMatch(
+    ok.vdi.out,
+    /coverageExcludes 只能写在|不认 coverageExcludes/,
+    `合法位置不得被判红（vdi）：\n${ok.vdi.out}`,
+  );
 });
 
 test("#773 R4 反证：生成器遇旧形状（裸 glob）必须以判词退出，不得抛栈崩掉", () => {
