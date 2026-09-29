@@ -8,10 +8,19 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: [
+      'packages/dsh-mcp-manager/test/client-dom/core-dom.test.ts',
+      'packages/dsh-mcp-manager/test/client-dom/float-panel-mount.test.ts',
+      'packages/dsh-mcp-manager/test/client-dom/float-pill-render.test.ts',
+      'packages/dsh-mcp-manager/test/client-dom/float-quick-add-form.test.ts',
+      'packages/dsh-mcp-manager/test/client-dom/float-servers-render.test.ts',
       'packages/dsh-mcp-manager/test/client-dom/panel-aria-modal.test.ts',
       'packages/dsh-mcp-manager/test/client-dom/settings-card.test.ts',
       'packages/dsh-mcp-manager/test/client-unit/client-context-s2.test.ts',
+      'packages/dsh-mcp-manager/test/client-unit/client-core-api.test.ts',
+      'packages/dsh-mcp-manager/test/client-unit/client-core-constants.test.ts',
+      'packages/dsh-mcp-manager/test/client-unit/client-core-i18n.test.ts',
       'packages/dsh-mcp-manager/test/client-unit/client-float-pure.test.ts',
+      'packages/dsh-mcp-manager/test/client-unit/client-locales.test.ts',
     ],
     environment: 'node',
     testTimeout: 60_000,

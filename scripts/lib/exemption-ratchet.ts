@@ -52,15 +52,63 @@ export interface RatchetBucket {
 export const RATCHET_BUCKETS: readonly RatchetBucket[] = [
   {
     file: "scripts/data/coverage.config.json",
-    // 14 → 13：#T1A 删掉 mcp-manager 客户端 core/session.ts 那条陈旧豁免
-    // （reason「尚无直连判据」为假、探针可打红）。按判据 ①，收口与下调必须同 PR。
-    // 本轮常量**维持 13（净减 0）**：本轮处理了 4 条 pending-project，但一条都没删。
-    // settings-card.tsx 那条本已具备删条条件（变异探针两处均打红、水位达标），仍保留——
-    // 缺的是**第二条件**（未进入 mutation-topology 的 mutate 面）：探针是一次性测量，
-    // mutate 面登记才是持续执法，两者不能互相顶替，故不放宽到 12。
-    // 另 3 条是**按文件收窄**（notifier .tsx 与 provider-usage 客户端各出 3 个文件进分母；
-    // shared/client/** 改写 reason 与 exitCriteria），收窄与改写都不增删条目。
-    ceiling: 13,
+    // 13 → 12：删掉 mcp-manager 客户端 core/i18n.ts 那条 pending-project 豁免。
+    // 该文件此前**零判据**（唯一导出 tStatus 从未被执行，量化日 lines 0% / branches 0%），
+    // 本轮以 test/client-unit/client-core-i18n.test.ts 直连补齐：字面量键锚表 + 恒等绑定
+    // 两支，六态逐态可求值。变异探针（把 tStatus 三元的两支对调）实测 exit 1，
+    // 判词为 tStatus 断言的 Expected/Received 反向，证明判据落在实现上。
+    // 12 → 11：删掉 client/locales.ts 那条 pending-project 豁免。该文件此前**零直接判据**——
+    // 水位 100%/100% 是被 index.ts 顶层 import「加载即满」的假达标（量化日把 4 个字典值
+    // 改成乱码后全量 1520 个测试仍全绿，exit 0）。本轮以 test/client-unit/client-locales.test.ts
+    // 补真判据：91 条键 × zh/en 的全量字面量镜像（期望值一行不从被测实现 import）+ 键平衡 /
+    // 占位符配对 / 非空三条机械判据。变异探针（即量化日那个「4 个字典值改乱码」）现 exit 1。
+    // 11 → 10：删掉 core/dom.ts 那条。该文件此前是台账里点名的**第二个假达标**——量化日水位
+    // 94.44%/76.92% 看似达标，但**变异探针实测零断言信号**（把 pangu 恒等化、把 el 的 class
+    // 通道改走 setAttribute 后，dsh-mcp-manager 全部 1520 个测试仍全绿，exit 0）；那 94.44% 全是
+    // float/panel/quick-add 渲染路径的顺带执行。本轮以 test/client-dom/core-dom.test.ts 补真判据
+    // （25 例：pangu 四向 + 连字符不撕开、七条属性通道归属、子节点两种传法）。同一手法下
+    // pangu 恒等化现 exit 1。
+    // 10 → 9：删掉 core/constants.ts 那条。量化日本文件 lines 60% / functions 0% / branches 0%——
+    // statusDot 被 float.ts:259 真实调用，但三个导出常量（API / STATUS_ORDER / STATUS_TEXT）无任何
+    // 直接断言，且 statusDot 的表外回落分支从未被走到。本轮以
+    // test/client-unit/client-core-constants.test.ts 补齐（11 例）：statusDot 六态配色用字面量表钉、
+    // 表外回落中性灰、回落色与 stopped/disabled 同串；STATUS_ORDER 展示次序与 titleKey 字面量钉；
+    // STATUS_TEXT 六态字典键字面量钉；API 11 条路由键面 + 绝对路径形态。
+    // 探针两处 exit 1：改 failed 档色值、改 statusDot 表外回落色。
+    // 9 → 8：删掉 core/api.ts 那条。量化日 lines 66.66% / functions 25% / branches 43.47%——
+    // 三个导出纯函数（toolDisableServerKey / cwdQueryOf / api）**零直接断言**，水位全是被调用路径
+    // 顺带执行的。本轮以 test/client-unit/client-core-api.test.ts 补齐（23 例）：
+    // toolDisableServerKey 的 @@global/<name> 与 @<root>/<name> 两形态 + projectRoot 缺失/空串/非字符串
+    // 三种 undefined 回落；cwdQueryOf 的非空编码与空串/非字符串空回落；api() 的 2xx/非 2xx error/无 error
+    // 兜底 HTTP <status>/body 解析失败两支、调用方自带 signal 时不装超时兜底且推钟后仍不 abort、
+    // 抛错路径定时器同样被清掉。探针四处 exit 1。
+    // 8 → 7：删掉 float/servers.ts 那条。量化日 lines 23.84% / functions 35.71% / branches 18.82%——
+    // 已有 client-float-pure.test.ts / smoke.test.ts 的直连判据只覆盖纯函数层（4 个纯函数），
+    // 18 个渲染/动作函数（renderServer / renderServers / serverToolsDetails / statusActions /
+    // disableAction / deleteAction / actionButton / serverCardHeader …）**全部未覆盖**，DOM 装配面
+    // 零判据。本轮以 test/client-dom/float-servers-render.test.ts 补齐（49 例）：端点摘要两形态、
+    // 状态动作三档的 URL/query 逐条钉、禁用/删除动作的 method+body、delete 的 confirm 闸（未确认
+    // 零请求）、编辑中才 resetForm、actionButton 失败 alert、单卡结构与 busy 态禁用删除、列表页
+    // 空态/需关注置顶/project+global 分组/组内排序/details 折叠态跨重渲染恢复。探针六处 exit 1。
+    // 7 → 6：删掉 float/quick-add.ts 那条。量化日 lines 43.78% / functions 35.71% / branches 43.47%——
+    // client-float-pure.test.ts 与 unit-summary-a3-guard.test.ts 只覆盖 5 个 guard 纯函数，
+    // buildQuickAdd（10 个表单控件 + transport 显隐切换 + 粘贴 JSON 导入）、saveForm /
+    // performSaveRequest 三种落点、fillForm 回填、resetForm、beginEdit 全部无判据。本轮以
+    // test/client-dom/float-quick-add-form.test.ts 补齐（76 例）：parseKV 两种分隔与空值落空串、
+    // stdio/http 两侧字段的空值不落键、fillKvField 投影省略时清零、isMigratedEdit 三判、
+    // performSaveRequest 三落点与「原条目有凭据时无条件中止」、saveForm 的占位符中止/整表清空删键、
+    // buildQuickAdd 的 10 控件与显隐切换、JSON 导入三态结果文案。探针见提交记录。
+    // 两条删除条件同时成立：① lines/branches 达 thresholds 同名键（见 pnpm cov 产物）；
+    // ② 已登记进 mutation-topology 的 client-panel 段 mutate（持续执法面）。
+    // 按维护者裁定「一条豁免一次落地」，每条豁免自成一次可独立回退的提交。
+    // 6 → 5：删掉 float/float.ts 那条（838 行，本批次最重的一条）。按维护者裁定的 8a/8b 两笔落：
+    // 8a 补胶囊与渲染层（renderPill / renderFloatHealth / renderFloatRow / renderFloatPanel 等），
+    // 实测 lines 193/335 = 57.61%、branches 144/231 = 62.34% —— 条件①**未**达成，故 8a 不删条目、
+    // 且不把本文件登记进 mutate（Stryker 按文件变异，判据未齐时登记等于向 client-panel 共用段
+    // 注入注定存活的变异体，代价由该段已收口的七个文件共同承担）。
+    // 8b 补 placePanel / toggleFloat / mountFloat / conversationHost / panelHost / dockedBottomEdge
+    // 后实测 lines 316/335 = 94.33%、branches 201/231 = 87.01%，双条件齐备，本笔才登记入面并删条目。
+    ceiling: 5,
     note: "覆盖率排除面的 pending-project 暂缺豁免（水位与变异面同时成立才可删）",
   },
   {
