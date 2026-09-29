@@ -42,11 +42,17 @@ interface FixturePackage {
   enableMutations?: unknown;
   [key: string]: unknown;
 }
+interface FixtureLayerMeta {
+  assertionTarget: "src" | "artifact" | "live";
+  environment: "node" | "dom";
+  mandatory: boolean;
+}
 interface FixtureTopology {
   $testLayers: {
     layers: Record<string, string>;
-    mutationLayers: string[];
-    mutationExcludeLayers: string[];
+    layerMeta: Record<string, FixtureLayerMeta>;
+    /** vitest 第二组 project 的唯一事实源（根相对 glob）；缺席即 fail-closed。 */
+    rootLayers: Record<string, string>;
   };
   sharedDefaults: Record<string, unknown>;
   packages: Record<string, FixturePackage>;
@@ -58,11 +64,22 @@ const TOPOLOGY: FixtureTopology = {
     layers: {
       unit: "test/unit/**/*.test.ts",
       integration: "test/integration/**/*.test.ts",
-      client: "test/client/**/*.test.ts",
+      bundle: "test/bundle/**/*.test.ts",
       e2e: "test/e2e/**/*.test.ts",
     },
-    mutationLayers: ["unit", "integration"],
-    mutationExcludeLayers: ["client", "e2e"],
+    // 变异面资格唯一事实源：assertionTarget === "src" 的层进变异面。
+    // 旧形态的 mutationLayers / mutationExcludeLayers 两个手写键已删（层改名 + 派生）。
+    layerMeta: {
+      unit: { assertionTarget: "src", environment: "node", mandatory: true },
+      integration: { assertionTarget: "src", environment: "node", mandatory: false },
+      bundle: { assertionTarget: "artifact", environment: "node", mandatory: false },
+      e2e: { assertionTarget: "live", environment: "node", mandatory: false },
+    },
+    // 形状契约必填项：rootLayers 是 vitest 第二组 project 的唯一事实源，缺席即 fail-closed
+    // （gen-stryker-conf.mjs 的 rootLayerProblems）。本 fixture 是**合成仓库**，被测判据另有其人，
+    // 但形状合法性是所有判据的前置，故必须自带一份「零命中为假」的登记：这里指向 fixture 自带的
+    // unit 层文件（BASE_FILES 里 unit-a/b/d 三个），既满足必填，又不改动任何派生产物。
+    rootLayers: { "fixture-unit": "packages/*/test/unit/*.test.ts" },
   },
   sharedDefaults: {
     testRunner: "vitest",
@@ -97,7 +114,7 @@ const BASE_FILES = {
   [`packages/${PKG}/test/unit/unit-b.test.ts`]: 'import "../../src/index.ts"\n',
   [`packages/${PKG}/test/unit/unit-d.test.ts`]: 'import "../../src/index.ts"\n',
   [`packages/${PKG}/test/integration/flow.test.ts`]: 'import "../../src/index.ts"\n',
-  [`packages/${PKG}/test/client/client-a.test.ts`]: 'import "../../src/client/ui.ts"\n',
+  [`packages/${PKG}/test/bundle/client-a.test.ts`]: 'import "../../src/client/ui.ts"\n',
   [`packages/${PKG}/test/e2e/smoke.test.ts`]: 'import "../../src/index.ts"\n',
   [`packages/${PKG}/test/helpers.ts`]: "export const h = 1\n",
   [`packages/${PKG}/package.json`]: `${JSON.stringify({ name: PKG, scripts: { test: "node ../../scripts/test/run-vitest.mjs --min 6" } }, null, 2)}\n`,
@@ -219,7 +236,7 @@ test("T2/T3①：runner 面文件全部自动分层，单元/集成层进变异�
     );
     assert.deepEqual(
       p.excludedFiles.map((f) => f.replace(`packages/${PKG}/`, "")),
-      ["test/client/client-a.test.ts", "test/e2e/smoke.test.ts"],
+      ["test/bundle/client-a.test.ts", "test/e2e/smoke.test.ts"],
       "client/e2e 层必须被排除",
     );
     assert.ok(
@@ -488,27 +505,35 @@ test("P0-2b：$noMutationPackages 声明过的包放行，但其 --min 仍受限
   }
 });
 
-test("P0-3 反证：把必需层移出 mutationLayers（或加进排除层）→ 判红", () => {
-  // 假绿向量：两行拓扑改动（mutationExcludeLayers 加 "unit"）能把变异面从 56 个文件削到 12 个，
-  // 而「声明 ↔ 派生一致」类判据全绿。充分性下限必须由代码常量锚定。
+test("P0-3 反证：把必需层移出变异面（或 layerMeta 整节删除）→ 判红", () => {
+  // 假绿向量：两行拓扑改动（把 unit 的 assertionTarget 改成 artifact）能把变异面从 56 个文件
+  // 削到 12 个，而「声明 ↔ 派生一致」类判据全绿。充分性下限必须由语义谓词 + 代码常量锚定。
+  //
+  // 强度不降的论证：旧形态三条向量打的是两个手写键（移出列表 / 加进排除列表 / 清空），
+  // 本形态改打 layerMeta 字段——覆盖面相同且更贴近真实攻击面（削面如今只需改一个字段，
+  // 不必构造一个自洽的列表）。并**新增第四条**：layerMeta 整节删除。
+  // 旧形态下整节删除的后果是「退化成空表 → 静默全 false」，新形态必须 fail-closed 抛错——
+  // 这条向量在旧形态下根本无法表达，是净增的反证能力。
   // [用例名, 拓扑变异]：变异函数只改内存形态，落盘由调用方做。
   const layerCases: Array<[string, (t: FixtureTopology) => void]> = [
     [
-      "unit 被移出 mutationLayers",
+      "unit 的 assertionTarget 被改成 artifact（移出变异面）",
       (t) => {
-        t.$testLayers.mutationLayers = ["integration"];
+        t.$testLayers.layerMeta.unit.assertionTarget = "artifact";
       },
     ],
     [
-      "unit 被加进排除层",
+      "unit 被改判为 live（同样非 src，同样移出变异面）",
       (t) => {
-        t.$testLayers.mutationExcludeLayers = ["client", "e2e", "unit"];
+        t.$testLayers.layerMeta.unit.assertionTarget = "live";
       },
     ],
     [
-      "mutationLayers 清空",
+      "layerMeta 里所有层的 assertionTarget 都改成非 src（层集合清空）",
       (t) => {
-        t.$testLayers.mutationLayers = [];
+        for (const meta of Object.values(t.$testLayers.layerMeta)) {
+          meta.assertionTarget = "artifact";
+        }
       },
     ],
   ];
@@ -530,6 +555,24 @@ test("P0-3 反证：把必需层移出 mutationLayers（或加进排除层）→
     } finally {
       removeFixtureRoot(root);
     }
+  }
+});
+
+test("P0-3 新增反证：layerMeta 整节删除 ⇒ fail-closed 抛错（不得静默退化为空变异面）", () => {
+  // 旧形态（mutationLayers 手写键）下删掉整节的后果是 layerNames 返回空表——两处调用方
+  // 各自拿到「看起来合理」的空变异面。新形态必须抛错，让调用方无从静默。
+  // 这条向量在旧形态下无法表达（删掉键即退化为空表且不报错），属净增反证能力。
+  const broken = structuredClone(TOPOLOGY);
+  delete (broken.$testLayers as { layerMeta?: unknown }).layerMeta;
+  const root = makeFixtureRoot({}, broken);
+  try {
+    assert.throws(
+      () => projectTestSurface(root, broken, PKG),
+      /layerMeta|fail-closed/,
+      "layerMeta 整节删除必须 fail-closed 抛错（不得静默退化为空表）",
+    );
+  } finally {
+    removeFixtureRoot(root);
   }
 });
 

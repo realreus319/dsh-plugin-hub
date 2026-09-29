@@ -330,7 +330,7 @@ contract-check 禁止运行时值导入）。原自建类型层 `types/dsh.d.ts`
 | `test/integration/**` | 以真实 socket/真实组合根为被测对象：起真实 http server（内核临时端口）走完整转发链、真实 cordis Context、真实配置迁移                               | 是       |
 | `test/client-unit/**` | 直连 `src/client/**` 的**纯逻辑**判据（判定、映射表、状态机），不需要 DOM；环境 `node`                                                                  | 是       |
 | `test/client-dom/**`  | 直连 `src/client/**` 但被测模块在**加载期或运行期真的读写 DOM**（`document.title`、横幅挂载），必须 `happy-dom`；文件头用 `@vitest-environment happy-dom` 声明（派生配置是单 project `node`，不吃根配置的层环境） | 是       |
-| `test/client/**`      | 断言对象是客户端**构建产物**形态（`lib/client.js`、或 in-place esbuild 后执行已构建副本）——产物外壳无法用 perTest 覆盖分析归因到任何 `src/**` 模块，登记进变异面只增加每个段的 dry run 成本、杀灭贡献为零；直连 src 的判据在 `client-unit` / `client-dom` | 否       |
+| `test/bundle/**`      | 断言对象是客户端**构建产物**形态（`lib/client.js`、或 in-place esbuild 后执行已构建副本）——产物外壳无法用 perTest 覆盖分析归因到任何 `src/**` 模块，登记进变异面只增加每个段的 dry run 成本、杀灭贡献为零；直连 src 的判据在 `client-unit` / `client-dom` | 否       |
 | `test/e2e/**`         | 真实监听端口 / spawn 子进程 / 真机系统调用的大 smoke                                                                                                | 否       |
 
 支撑模块不入任何层：`test/helpers.ts`、`test/client-helpers.ts`（客户端判据共用的替身，只服务
@@ -361,10 +361,50 @@ contract-check 禁止运行时值导入）。原自建类型层 `types/dsh.d.ts`
 `import` `shared/client/ensure-style.ts`，两条冒烟断言即让 istanbul 报出该文件
 lines 80.95% / branches 47.36%。
 
-因此满足 (A) 只有两条路，都**不是**「搬测试」：在 `$testLayers.layers` 里新增一层
-（要改 `mutation-topology.json` 这个事实源），或把 shared 判据放进某个包的
-`test/<层>/` 下（要同步该包 `--min` 与变异面登记）。这正是 `shared/client/**` 至今仍是
-pending-project 的原因。
+因此满足 (A) **不是**「搬测试」，只有三条路：在 `$testLayers.layers` 里新增一层
+（要改 `mutation-topology.json` 这个事实源）、把 shared 判据放进某个包的 `test/<层>/` 下
+（要同步该包 `--min` 与变异面登记），或登记进 `$testLayers.rootLayers`（#1074，见下节）。
+`shared/client/**` 走的是第三条：判据落进 root-shared 面后，`shared/client/*.ts` 已在
+`coverage.config.json` 的 include 面内，`shared/client/**` 那条 pending-project 豁免随之消失
+（故本节上文那条豁免在台账里已查无此条，实测 `exclude` 中匹配 `shared/client` 的条目为 0）。
+
+#### `rootLayers`：根相对的第二组 project（#1074）
+
+`$testLayers.rootLayers` 与 `$testLayers.layers` 的区别是**相对性**，不是「另一批层」：
+
+| 键                                | glob 相对谁                        | 展开到                  | 消费方与判词面                                                                                             |
+| --------------------------------- | --------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `$testLayers.layers.<层>`          | **包内**相对，对每个包各展开一次   | `packages/<pkg>/<glob>` | 根 `vitest.config.ts` 的六层 project；并按 `layerMeta.assertionTarget` 决定是否进**包级**变异面并集 |
+| `$testLayers.rootLayers.<层>`      | **仓库根**相对，只展开一次、不加前缀 | `<glob>`              | 根 `vitest.config.ts` 的第二组 project（root-shared 面）；**不进**包级变异面并集                     |
+
+判词面也随之不同：`layers` 的层要过 `layerMeta.assertionTarget` 才进包级变异面并集；
+`rootLayers` 不参与那个并集——它是独立一组 project，断言对象是 `shared/` 下的直连 `.ts` 源，
+不属于任何包的 `test/<层>/`。当前唯一登记：`{ "shared-mutation": "shared/test/**/*.mutation.test.ts" }`。
+
+**零命中必须 fail-closed**，因为空 project 在 vitest 里**完全静绿**。实测构造（本节结论的唯一依据，
+于 mkdtemp 目录内真跑 vitest 4.1.11，两次退出码均已复现）：
+
+```ts
+// 同一份配置里两个 project：一个命中真实文件，一个 glob 指向不存在的路径
+projects: [
+  { test: { name: "probe-has-files", include: [resolve(here, "test/a.probe.test.ts")] } },
+  { test: { name: "probe-empty", include: ["test/does-not-exist-*.test.ts"] } },
+]
+```
+
+- `vitest run --project probe-has-files --project probe-empty` → `Test Files 1 passed (1)`、
+  `Tests 1 passed (1)`、**exit 0**，输出全程**零字**提到 `probe-empty`；
+- `vitest run --project probe-empty`（单独选它）→ `No test files found, exiting with code 1`、exit 1。
+
+即「glob 写错 ⇒ vitest 报 No test files found ⇒ 非零退出」这个假设**只在空 project 是唯一选择时成立**；
+而真实运行（`pnpm cov`、stryker 的 vitest runner）永远同时带着别的 project，那条报错**永不触发**。
+后果：一个拼错的 `rootLayers`（段序写反、加错前缀）会让覆盖率照常绿、该 project 的判据永不执行，
+而**没有任何一条判词指出这件事**。
+
+故 `scripts/gate/gen-stryker-conf.mjs` 的 `rootLayerProblems()` 对每条 rootLayer 判两件事，
+都判 exit 1：① glob 必须是非空字符串；② 该 glob 在磁盘上**至少命中 1 个 `.test.ts`**。
+整节缺失按**必填**处理——`rootLayers` 是第二组 project 的唯一事实源，缺席等于那一组整体消失，
+与「零命中」同属无判据的静默。
 
 登记链路（唯一事实源 = `scripts/data/mutation-topology.json` 的 `$testLayers` 与各包 `testLayers`）：
 
@@ -391,7 +431,7 @@ pending-project 的原因。
 - 新增测试文件后的固定动作：放进对应层目录 → 在所属包认领它的段的 `testFiles` 里登记（见下段归属） → `node scripts/gate/gen-stryker-conf.mjs --sync-test-min`
   → `pnpm stryker:gen` → 提交。层归属**零手工登记**（目录即分类）；段归属必须显式登记；`testMutationExemptions`（按层分组）只用于
   「刻意不进变异面」的逐条裁决，必须写明理由，模型样例两条：
-  mcp 的 `unit/unit-shared.test.ts`（测的是 shared 层，不在本包 mutate 面内）、
+  mcp 的 `unit/shared.test.ts`（测的是 shared 层，不在本包 mutate 面内）、
   notifier 的 `integration/real-context.test.ts`（Stryker 沙箱内 dry run 失败，属 #712 记录的沙箱语义族）；
 - 变异面扩缩**在 PR 门禁里看不出来**（`incremental: true` 复用基线状态）。真信号来自 observe.yml
   班次全量重建；PR 内的自证方式是「派生测试面 ↔ 基线的集合对比 + 单段真跑 stryker 报告的
@@ -407,7 +447,7 @@ pending-project 的原因。
   漏进才危险。拿不准就多放，`--check` 只拦漏不拦多。
 - **三条硬约束**（`gen --check` 自动判）：① 并集恒等——变异层的新测试必须进 ≥1 段，
   否则并集缺口判红（删文件请删磁盘文件本身）；② 层成员资格——条目必须已在包级变异面内，
-  `test/e2e/**`、`test/client/**`、support 文件写进去即红（e2e/client 的新测试不落段）；
+  `test/e2e/**`、`test/bundle/**`、support 文件写进去即红（e2e/client 的新测试不落段）；
   ③ 段非空——清单不得为空数组。
 - **固定动作**：改拓扑对应段清单 → `pnpm stryker:gen`（派生段级 vitest 配置并切换 conf 指针）
   → `gen --check` 绿。段级 vitest 配置变更只失效该段增量基线（registry＋`changed-test-packages`

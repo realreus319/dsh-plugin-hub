@@ -98,8 +98,10 @@ function declaredCoverageExcludePackages(topology: {
   return declared.sort();
 }
 
-test("P2 root-shared：真实拓扑精确登记 settings namespace 变异段", () => {
+test("P2 root-shared：真实拓扑精确登记两段变异面（settings-namespace + client）", () => {
   const topology = JSON.parse(readFileSync(TOPOLOGY_PATH, "utf8"));
+  // 闭枚举快照：$rootShared 的**全部**段连同 comment 逐字钉住。#1074 起是两段（此前只有
+  // settings-namespace 一段）。少一段=漏登记，多一段=凭空冒出来的未登记段——两种都判红。
   assert.deepEqual(topology.$rootShared, {
     testRoot: "shared",
     testPattern: "test/**/*.mutation.test.ts",
@@ -111,6 +113,13 @@ test("P2 root-shared：真实拓扑精确登记 settings namespace 变异段", (
         testFiles: ["shared/test/settings-namespace.mutation.test.ts"],
         comment:
           "Phase 5 P2：lan/mcp 共同运行时接缝；descriptor/source/onChange 与写入委托由独立 Vitest 行为判据直接覆盖。",
+      },
+      client: {
+        mutate: ["shared/client/ensure-style.ts", "shared/client/i18n.ts"],
+        excludes: [],
+        testFiles: ["shared/test/shared-client.mutation.test.ts"],
+        comment:
+          "新增（#1074）：shared/client 的**直连 .ts 源**判据。这两个文件此前记在 scripts/test/ 下的两个 node:test 文件里，import 的是 `shared/client/ensure-style.js` / `i18n.js`——**tsc 原地 emit 的产物**，被 shared 下的 .js not-source 条目排除，istanbul 计的是那个被 import 的 .js，.ts 源因此恒 0%；且那两个文件跑在 `node --test` 上，**根本不属于任何 vitest project**（vitest projects 的 include 恒带 `packages/*/` 前缀，见 coverage.config.json 里 shared/client/** 那条的 reason）。故 coverage.config.json 的 shared/client/** 豁免**从建立起就诚实**：它记的是「这个源没有任何可计分的判据」。本段修的是**根因**——判据换成 import `.ts` 源并落到 vitest 的 root-shared 面，判据一落位，豁免自然消失，不必单独去改台账。**为什么这两个文件没有登记进包级变异面资格**：`layerMeta` 的 assertionTarget 判据只覆盖 `$testLayers.layers`（包级六层），root-shared 面是独立一组 project，其断言对象是 shared 的直连源码、不属于任何包的 test/ 层，故不进包的变异面并集。**面内可变异的是什么**：`ensure-style.ts` 的注入/幂等/version 重建/disposer 路径，与 `i18n.ts` 的 bindLocale 活绑定与防御分支。**纯字面量表为何不逐个排除、而靠 sharedDefaults.excludedMutations**：仓内既有先例见本文件 `packages/dsh-notifier` 的 `channels` 段——「#769 批 4 加围栏拒答 code 表（refusal.ts，纯数据无变异体）」；该形态由 `sharedDefaults.excludedMutations` 的 StringLiteral / ArrayLiteral / ObjectLiteral / TemplateLiteral 四项统一排除，逐个登记只会**增加每个段的 dry run 成本、杀灭贡献为零**。本段不逐文件登记字面量表，同此纪律。",
       },
     },
   });
@@ -863,7 +872,18 @@ function confOwnerOf(
 
 /** #836 反证用的最小仓库根：一份 conf 的 mutate 面完全由段声明决定。 */
 // excludes 取 undefined 时 JSON 落盘丢键，正是「段没写 excludes」的形态（见调用方注释）。
-function makeMutationFixture(excludes: string[] | undefined) {
+//
+// rootLayers 同理：默认给一份**合法且非零命中**的登记（形状契约的对照组），传
+// ABSENT_ROOT_LAYERS 则整个键在 JSON 里消失 = 「rootLayers 整节缺席」那条反证形态；传非法值则是
+// 第三条反证。哨兵不能用 undefined —— 显式传 undefined 会触发默认参数，构造不出「整节缺席」。
+const ABSENT_ROOT_LAYERS = Symbol("absent-rootLayers");
+
+function makeMutationFixture(
+  excludes: string[] | undefined,
+  rootLayers: unknown = { "fixture-unit": "packages/*/test/unit/*.test.ts" },
+) {
+  // 哨兵折成 undefined：JSON.stringify 遇到 undefined 的属性会直接丢键，整节即缺席。
+  const declaredRootLayers = rootLayers === ABSENT_ROOT_LAYERS ? undefined : rootLayers;
   const root = mkdtempSync(join(tmpdir(), "f836-fixture-"));
   const pkg = "fixture-pkg";
   const files = {
@@ -876,11 +896,20 @@ function makeMutationFixture(excludes: string[] | undefined) {
           layers: {
             unit: "test/unit/**/*.test.ts",
             integration: "test/integration/**/*.test.ts",
-            client: "test/client/**/*.test.ts",
+            bundle: "test/bundle/**/*.test.ts",
             e2e: "test/e2e/**/*.test.ts",
           },
-          mutationLayers: ["unit", "integration"],
-          mutationExcludeLayers: ["client", "e2e"],
+          // 变异面资格由 layerMeta.assertionTarget 派生，两个手写列表键已删。
+          layerMeta: {
+            unit: { assertionTarget: "src", environment: "node", mandatory: true },
+            integration: { assertionTarget: "src", environment: "node", mandatory: false },
+            bundle: { assertionTarget: "artifact", environment: "node", mandatory: false },
+            e2e: { assertionTarget: "live", environment: "node", mandatory: false },
+          },
+          // 形状契约必填项（#1074）：rootLayers 是 vitest 第二组 project 的唯一事实源。
+          // 默认值指向本 fixture 自带的 packages/fixture-pkg/test/unit/unit-a.test.ts，零命中为假；
+          // 传 ABSENT_ROOT_LAYERS 时下面的 declaredRootLayers 是 undefined，落盘即整节缺席。
+          rootLayers: declaredRootLayers,
         },
         sharedDefaults: {
           testRunner: "vitest",
@@ -935,6 +964,91 @@ function runGenerator(root: string, args: string[] = []) {
   return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
 }
 
+/**
+ * #1074：rootLayers 的形状与零命中判据（gen-stryker-conf.mjs 的 rootLayerProblems）。
+ *
+ * 为什么零命中必须 **fail-closed**——判据存在的唯一理由，构造与退出码均为实测（mkdtemp 内真跑
+ * vitest 4.1.11，两次分别复现）：
+ *
+ *   projects: [ {name:probe-has-files, include: <abs>/a.probe.test.ts},
+ *               {name:probe-empty,     include: test/does-not-exist-*.test.ts} ]
+ *   npx vitest run --project probe-has-files --project probe-empty
+ *     → Test Files 1 passed (1)、Tests 1 passed (1)、**exit 0**，输出全程**零字**提到 probe-empty
+ *   npx vitest run --project probe-empty          // 单独选它
+ *     → No test files found, exiting with code 1、exit 1
+ *
+ * 即空 project 的报错**只在它是唯一选择时成立**；真实运行（pnpm cov、stryker 的 vitest runner）
+ * 永远同时带着别的 project，那条报错**永不触发**。所以「运行期会不会发现」这个问题本身答案是
+ * 「不会」——一个拼错的 rootLayers（段序写反、加错前缀）会让覆盖率照常绿、该 project 的判据
+ * 永不执行，而没有任何一条判词指出这件事。故形状与零命中都必须在**生成期**判红。
+ */
+test("#1074 反证：rootLayers 的 glob 零命中 ⇒ 判红并点名该层与该 glob", () => {
+  // 段序写反 / 加错前缀的典型形态：glob 指向磁盘上不存在的路径（收集 0 个文件）。
+  const root = makeMutationFixture([], { "shared-mutation": "shared/test/**/*.mutation.test.ts" });
+  try {
+    const res = runGenerator(root);
+    assert.equal(res.status, 1, `零命中必须判红：\n${res.out}`);
+    assert.match(res.out, /rootLayer "shared-mutation"/, "判词要点名是哪个层");
+    assert.match(
+      res.out,
+      /shared\/test\/\*\*\/\*\.mutation\.test\.ts/,
+      "判词要点名那条 glob（否则改错的人不知道该改什么）",
+    );
+    assert.match(res.out, /零命中/, "判词要点明是零命中而不是别的形状问题");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1074 反证：rootLayers 整节缺席 ⇒ fail-closed 判红（不得静默退化为「没有 root 层」）", () => {
+  // rootLayers 是 vitest 第二组 project 的**唯一**事实源。整节缺席 = 那一组 project 整体消失，
+  // 与零命中同属无判据的静默，故按必填处理。
+  const root = makeMutationFixture([], ABSENT_ROOT_LAYERS);
+  try {
+    const res = runGenerator(root);
+    assert.equal(res.status, 1, `整节缺席必须判红：\n${res.out}`);
+    assert.match(res.out, /\$testLayers\.rootLayers 缺失或形状不合法/, "判词要点名缺的是哪一节");
+    assert.match(res.out, /fail-closed/, "判词要写明是 fail-closed 而非降级放行");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** [用例名, 非法 rootLayers 形态]：整节非法，以及在场但条目非法的三种。 */
+const BAD_ROOT_LAYERS: Array<[string, unknown]> = [
+  ["整节不是对象（字符串）", "nope"],
+  ["整节是数组", ["packages/*/test/unit/*.test.ts"]],
+  ["整节是 null", null],
+  ["条目值不是字符串", { "fixture-unit": 42 }],
+  ["条目值是空串", { "fixture-unit": "   " }],
+];
+for (const [label, bad] of BAD_ROOT_LAYERS) {
+  test(`#1074 反证：rootLayers ${label} ⇒ 判红`, () => {
+    const root = makeMutationFixture([], bad);
+    try {
+      const res = runGenerator(root);
+      assert.equal(res.status, 1, `${label} 必须判红：\n${res.out}`);
+      assert.match(res.out, /rootLayer|rootLayers/, `判词要点名是 rootLayers 这一节：\n${res.out}`);
+      assert.doesNotMatch(
+        res.out,
+        /TypeError|is not iterable|Cannot read/,
+        `形状错误不得以抛栈形态出现：\n${res.out}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("#1074 对照组：rootLayers 合法且非零命中 ⇒ 生成成功（证明上面几条红来自判据本身）", () => {
+  const root = makeMutationFixture([]);
+  try {
+    const res = runGenerator(root);
+    assert.equal(res.status, 0, `对照组应生成成功：\n${res.out}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 test("#836 反证：段省略 excludes 时 --check 判红并点名段，不得抛栈", () => {
   // makeMutationFixture(undefined) 让 excludes 键整个缺席（JSON.stringify 会丢掉 undefined 值），
   // 这正是「段没写 excludes」的形态。

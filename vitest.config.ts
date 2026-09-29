@@ -35,11 +35,14 @@ const LAYER_RUNTIME = {
   integration: { environment: "node", testTimeout: 60_000, hookTimeout: 60_000 },
   // e2e 走真实端口、文件系统与子进程，单文件最坏数百秒（mcp-manager smoke 实测 328s）
   e2e: { environment: "node", testTimeout: 600_000, hookTimeout: 600_000 },
-  // test/client/** 只剩断言对象不是 src 本身的那部分（读 lib 产物、或 in-place esbuild 后执行
+  // test/bundle/** 只剩断言对象不是 src 本身的那部分（读 lib 产物、或 in-place esbuild 后执行
   // 已构建副本），不需要 DOM 环境。两层不能合并：直连 src 的 DOM 用例会让 import.meta.url 在
   // happy-dom 下变成 http 协议并抛「The URL must be of scheme file」，而纯逻辑判据又必须直连
   // 源码才能进变异面。
-  client: { environment: "node" },
+  bundle: { environment: "node" },
+  // root-shared 层（#1074）：shared/test 下的 *.mutation.test.ts。node 环境、无 DOM；
+  // 超时与 unit 对齐（与既有 shared-settings-namespace 段的 vitest.stryker.d 配置同口径）。
+  "shared-mutation": { environment: "node", testTimeout: 60_000, hookTimeout: 60_000 },
   // test/client-unit/** 直连 src/client/** 的纯逻辑判据：不要 DOM，但必须直连源码（见文件头）。
   // 超时口径与 unit 对齐：这里跑的是同一批实现里的判断，个别用例的预算同样是 30s 量级。
   "client-unit": { environment: "node", testTimeout: 60_000, hookTimeout: 60_000 },
@@ -50,7 +53,38 @@ const LAYER_RUNTIME = {
 };
 
 /** 层名 → project 名：`--project contract` 是既有 CLI 契约（release.yml / package.json 在用），保留别名。 */
-const PROJECT_NAME = { client: "contract" };
+const PROJECT_NAME: Record<string, string> = { bundle: "contract" };
+
+/**
+ * 取某层的运行环境与超时；**层未登记即抛错**（fail-closed）。
+ *
+ * 为什么不能像原先那样直接 `...LAYER_RUNTIME[layer]`：查不到会得到 undefined，展开即空对象，
+ * 静默退回 vitest 默认 5s / 10s——而其余层是 60s。一次「12 倍收紧」表现为随机 flake，
+ * **没有任何判据会红**，是本仓最难查的一类静默降级。
+ * 新增一层却忘了在 LAYER_RUNTIME 登记，必须在 import 期炸出来。
+ */
+function runtimeFor(layer: string): Record<string, unknown> {
+  const runtime = (LAYER_RUNTIME as Record<string, Record<string, unknown> | undefined>)[layer];
+  if (runtime === undefined) {
+    throw new Error(
+      `LAYER_RUNTIME 未登记层 "${layer}" —— 新增测试层必须在此声明 environment 与超时；` +
+        "缺登记会展开成空对象并静默退回 vitest 默认 5s/10s（其余层为 60s），表现为无判据的随机 flake",
+    );
+  }
+  return runtime;
+}
+
+/**
+ * 反向校验：PROJECT_NAME 的每个键都必须是已声明的层。
+ * 别名表写成陈旧层名时，project 名会悄悄变成层名本身，`--project contract` 静默失效。
+ */
+for (const alias of Object.keys(PROJECT_NAME)) {
+  if (!Object.prototype.hasOwnProperty.call(LAYER_RUNTIME, alias)) {
+    throw new Error(
+      `PROJECT_NAME 的键 "${alias}" 不是已声明的层 —— 别名指向不存在的层，project 名会退化为层名`,
+    );
+  }
+}
 
 export default defineConfig({
   test: {
@@ -59,13 +93,31 @@ export default defineConfig({
     // 单例会共享第一次求值时的 home：轻则写进已删除的临时目录（红得莫名其妙），重则写进真实
     // `~/.dsh`（#218 污染红线）。vitest 大版本换过隔离实现，故把这条不变量写成可审查的事实。
     isolate: true,
-    projects: Object.entries(mutationTopology.$testLayers.layers).map(([layer, glob]) => ({
-      test: {
-        name: PROJECT_NAME[layer] ?? layer,
-        include: [`packages/*/${glob}`],
-        ...LAYER_RUNTIME[layer],
-      },
-    })),
+    projects: [
+      // ── 第一组：包级层 ────────────────────────────────────────────────
+      // `layers` 的 glob 是**包内相对**（test/unit/**），故要加 `packages/*/` 前缀才是
+      // 仓库根相对路径。前缀写在这里而不是数据里：数据保持「层内相对」这一单一语义。
+      ...Object.entries(mutationTopology.$testLayers.layers).map(([layer, glob]) => ({
+        test: {
+          name: PROJECT_NAME[layer] ?? layer,
+          include: [`packages/*/${glob}`],
+          ...runtimeFor(layer),
+        },
+      })),
+      // ── 第二组：root-shared 层（#1074）─────────────────────────────────
+      // `rootLayers` 的 glob 已经是**根相对**（shared/test/**），**不再加任何前缀**——
+      // 这是它与 `layers` 的唯一区别，也是最易写错的一处（加前缀或段序写反都会让该
+      // project 静默零命中：vitest 在同一次运行里只要有别的 project 命中，空 project
+      // 不会被报错，只会被跳过）。
+      // 形状与「零命中即红」判据见 scripts/gate/gen-stryker-conf.mjs 的 rootLayerProblems。
+      ...Object.entries(mutationTopology.$testLayers.rootLayers).map(([layer, glob]) => ({
+        test: {
+          name: PROJECT_NAME[layer] ?? layer,
+          include: [glob],
+          ...runtimeFor(layer),
+        },
+      })),
+    ],
     coverage: {
       provider: "istanbul",
       include: coverage.include,

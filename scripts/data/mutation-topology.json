@@ -1,17 +1,66 @@
 {
   "$comment": "变异面登记与派生的单一事实源（#690 S2b）。本文件是**派生红线面**的成员（被 scripts/data/threshold-registry.json 的 mutation.timeoutMS 声明为 sources），改它会触发 Build / Red-line approval 的人工批准。判据⑦（#843 计划项 3-1）：gen-stryker-conf --check 除既有各条外，还把本文件每个包的变异文件**并集**与基准 ref（默认 origin/main）比对，收缩即判红——段之间挪动合法（并集不变），把文件挪出变异面到任何段的 excludes / 包级 coverageExcludes 非法，文件在本分支已被真正删除属正当收缩。唯一放宽通道是 scripts/data/gate-exemptions.json 里 gate=mutation-face 的条目（path 形如 <包名>:<仓库根相对文件>，或 <包名>:* 豁免整包）；台账里对不上缺口的键判红。判据自带载体自证：进入比对面的包数 / 候选文件数任一为 0 即判红，不是恒绿。",
   "$testLayers": {
-    "$comment": "测试分层与变异面登记的单一事实源（#690 S2b / #713 T1–T3）。runner 层 = test/**/*.test.ts 的全集（vitest include 的 glob 即此口径）；mutation 层 = unit + integration + client-unit + client-dom（四层都直连 src、都能贡献杀灭；client-unit 是 node 环境下的客户端纯逻辑判据，client-dom 是 happy-dom 环境下的客户端 DOM 判据）；exclude 层 = client（**只剩断言对象不是 src 本身的那部分**：读 lib/client.js 的产物契约、或 in-place esbuild 后执行已构建副本——静态导入图里没有目标模块，登记进变异面清单只会增加每个段的 dry run 成本、杀灭贡献为零）+ e2e（真实端口/子进程/真机系统调用）。support 不入任何层：test/helpers.ts、test/client-helpers.ts、test/smoke-lib.ts、test/smoke-pure.ts、test/*.worker.mjs 是支撑模块，不是测试条目。gate 判据（scripts/gate/test-surface.mjs 的 collectUnattributedErrors，判词「测试文件无层归属」）：每个 test/**/*.test.ts 必须落入某一层的 glob，或写进该包 testLayers.testMutationExemptions（按层分组、逐条带理由）——**无第三条路**，故新增测试文件必须显式决定其层归属，不能靠「没写进清单」逃逸。刻意不进变异面的**唯一**登记位就是 testMutationExemptions（#875 4b+4d：原 unitExemptions 键全仓无任何判据读取，是零消费的登记，已删；它描述的「gate 校验其非空且真实存在于 unit 层」从未存在）。",
+    "$comment": "测试分层与变异面登记的单一事实源（#690 S2b / #713 T1–T3）。\n**哪些层进变异面不再是散文规则，而由 `layerMeta.<层>.assertionTarget` 派生**：`assertionTarget === \"src\"` 的层进变异面，其余（`artifact` / `live`）不进。\n本文件不再保留 `mutationLayers` / `mutationExcludeLayers` 两个手写键——同一事实两处声明，就一定会有一处先腐烂（旧形态正是如此：把 `unit` 加进 `mutationExcludeLayers` 两行即可把变异面从 56 个文件削到 12 个而门禁全绿）。派生规则的唯一执法点是 `scripts/gate/test-surface.mjs` 的 `layerNames()` 与 `collectSufficiencyErrors()`。\nrunner 层 = `test/**/*.test.ts` 的全集（vitest include 的 glob 即此口径）。\nsupport 不入任何层（逐条见 `supportFiles`；实测已穷举 packages/*/test 下全部 17 个非 .test.ts 文件逐条对上）。\n**仓库根的 `test/smoke-lib.ts` 不在本表**：它不在 `packages/*/test/` 下，且在 `scripts/data/ci-face-registry.json` 有独立条目，两处登记不得互相覆盖。\ngate 判据（collectUnattributedErrors，判词「测试文件无层归属」）：每个 `test/**/*.test.ts` 必须落入某一层的 glob，或写进该包 `testLayers.testMutationExemptions`（按层分组、逐条带理由）——**无第三条路**。\n刻意不进变异面的**唯一**登记位就是 `testMutationExemptions`（#875 4b+4d：原 unitExemptions 键全仓无任何判据读取，是零消费的登记，已删）。\n\n**次序纪律（src/client/float 一役确立，不得降格为并列前提）**：变异探针是一次性测量——旁边新加一个没被覆盖的函数，前一次探针打红照样成立；只有把判据**登记进 mutate 面**才是持续执法。故新增判据的次序恒为「先写判据 → 跑探针 → 确认能打红 → **登记 mutate 面（收口最后一步）**」，登记不是与探针并列的另一个前提，而是收口的最后一步：判据未齐就登记，Stryker 会按文件注入注定存活的变异体，白付每个段的 dry run 成本。证据与判词见 `scripts/data/coverage.config.json` 的 note「传递覆盖不算达标」段。\n\n`mixedTargets` 登记 `bundle` 层里**目标模块以可执行模块身份出现在该测试静态导入图里**的测试文件。\n**未验证**：这两条的判定理由原应「照设计稿」逐字落库，设计稿不在本次施工范围内，故此处不代拟理由、只保留冻结清单本身，落库前需维护者补齐。\n实测依据（仅供补理由时参考，不代拟）：① `routes.test.ts` 静态 import `../../src/apply/apply.ts` 的 `ROUTES`（:20），**但按该文件自陈，宿主侧是被比较的期望源、判据面只看客户端常量**——即「同源期望」形态：期望源以可执行模块进了导入图，被测主体仍是产物；② `report-p0.test.ts` 静态 import `../../src/client/locales.ts` 的 `zh, en`（:14），而 esbuild 副本测的是 `src/client/report-helpers.ts`。\n对照组：notifier 的 `capabilities.test.ts` / `reason-text.test.ts` **无任何静态 src import**（实测 grep `^import .*from \"[^\"]*src/` 为空），只读 `lib/client.js` 产物与源文本契约——后者文件头自陈「跨端一致性与纯函数行为判据已搬到 test/client-unit/ 直连源码」，此处刻意只留打包不变量，故不入 mixedTargets。",
+    "layerMeta": {
+      "unit": {
+        "assertionTarget": "src",
+        "environment": "node",
+        "mandatory": true,
+        "responsibility": "单模块 / 纯逻辑 / fake 驱动、只做临时目录 I/O 的判据；直连 src 源码，故能对变异体贡献杀灭。"
+      },
+      "integration": {
+        "assertionTarget": "src",
+        "environment": "node",
+        "mandatory": false,
+        "responsibility": "以真实 socket / 真实组合根（cordis Context、真实配置迁移）为被测对象的判据；直连 src 源码。"
+      },
+      "client-unit": {
+        "assertionTarget": "src",
+        "environment": "node",
+        "mandatory": false,
+        "responsibility": "直连 src/client/** 的客户端纯逻辑判据（判定、映射表、状态机），不需要 DOM。"
+      },
+      "client-dom": {
+        "assertionTarget": "src",
+        "environment": "dom",
+        "mandatory": false,
+        "responsibility": "直连 src/client/** 但被测模块在加载期或运行期真的读写 DOM，必须 happy-dom 环境。"
+      },
+      "bundle": {
+        "assertionTarget": "artifact",
+        "environment": "node",
+        "mandatory": false,
+        "responsibility": "断言客户端构建产物形态（读 lib/client.js、或 in-place esbuild 后执行已构建副本）；产物外壳无法用 perTest 覆盖分析归因到任何 src/** 模块，故不进变异面、也不产生覆盖率。"
+      },
+      "e2e": {
+        "assertionTarget": "live",
+        "environment": "node",
+        "mandatory": false,
+        "responsibility": "真实监听端口 / spawn 子进程 / 真机系统调用的大 smoke；无静态导入图，故不进变异面。"
+      }
+    },
     "layers": {
       "unit": "test/unit/**/*.test.ts",
       "integration": "test/integration/**/*.test.ts",
       "client-unit": "test/client-unit/**/*.test.ts",
-      "client": "test/client/**/*.test.ts",
       "client-dom": "test/client-dom/**/*.test.ts",
+      "bundle": "test/bundle/**/*.test.ts",
       "e2e": "test/e2e/**/*.test.ts"
     },
-    "mutationLayers": ["unit", "integration", "client-unit", "client-dom"],
-    "mutationExcludeLayers": ["client", "e2e"]
+    "supportFiles": [
+      "test/tsconfig.json（6 个包各一份：dsh-decision-gateway / dsh-lan-proxy / dsh-mcp-manager / dsh-notifier / dsh-provider-usage / dsh-worktree-sidebar）",
+      "test/*.worker.mjs（dsh-provider-usage：client-fetch-timeout.worker.mjs、client-revalidate.worker.mjs）",
+      "test/hotreload-probe.mjs（dsh-provider-usage）",
+      "test/helpers.ts（dsh-mcp-manager / dsh-notifier / dsh-provider-usage / dsh-worktree-sidebar）",
+      "test/client-helpers.ts（dsh-decision-gateway / dsh-notifier）",
+      "test/smoke-pure.ts（dsh-provider-usage）",
+      "test/*/consumer-product-face.ts（dsh-notifier test/integration/）"
+    ],
+    "mixedTargets": ["routes.test.ts", "report-p0.test.ts"],
+    "rootLayers": {
+      "shared-mutation": "shared/test/**/*.mutation.test.ts"
+    }
   },
   "$noMutationPackages": {
     "$comment": "磁盘上有测试文件、但刻意不登记变异面的包（逐个写明理由）。登记在此的包仍受 `--check` 判据 ③（--min == runner glob 实际文件数）约束——「不登记变异面」不等于「不受门禁」；漏登且未在此声明的包一律判红。",
@@ -27,6 +76,12 @@
         "excludes": [],
         "testFiles": ["shared/test/settings-namespace.mutation.test.ts"],
         "comment": "Phase 5 P2：lan/mcp 共同运行时接缝；descriptor/source/onChange 与写入委托由独立 Vitest 行为判据直接覆盖。"
+      },
+      "client": {
+        "mutate": ["shared/client/ensure-style.ts", "shared/client/i18n.ts"],
+        "excludes": [],
+        "testFiles": ["shared/test/shared-client.mutation.test.ts"],
+        "comment": "新增（#1074）：shared/client 的**直连 .ts 源**判据。这两个文件此前记在 scripts/test/ 下的两个 node:test 文件里，import 的是 `shared/client/ensure-style.js` / `i18n.js`——**tsc 原地 emit 的产物**，被 shared 下的 .js not-source 条目排除，istanbul 计的是那个被 import 的 .js，.ts 源因此恒 0%；且那两个文件跑在 `node --test` 上，**根本不属于任何 vitest project**（vitest projects 的 include 恒带 `packages/*/` 前缀，见 coverage.config.json 里 shared/client/** 那条的 reason）。故 coverage.config.json 的 shared/client/** 豁免**从建立起就诚实**：它记的是「这个源没有任何可计分的判据」。本段修的是**根因**——判据换成 import `.ts` 源并落到 vitest 的 root-shared 面，判据一落位，豁免自然消失，不必单独去改台账。**为什么这两个文件没有登记进包级变异面资格**：`layerMeta` 的 assertionTarget 判据只覆盖 `$testLayers.layers`（包级六层），root-shared 面是独立一组 project，其断言对象是 shared 的直连源码、不属于任何包的 test/ 层，故不进包的变异面并集。**面内可变异的是什么**：`ensure-style.ts` 的注入/幂等/version 重建/disposer 路径，与 `i18n.ts` 的 bindLocale 活绑定与防御分支。**纯字面量表为何不逐个排除、而靠 sharedDefaults.excludedMutations**：仓内既有先例见本文件 `packages/dsh-notifier` 的 `channels` 段——「#769 批 4 加围栏拒答 code 表（refusal.ts，纯数据无变异体）」；该形态由 `sharedDefaults.excludedMutations` 的 StringLiteral / ArrayLiteral / ObjectLiteral / TemplateLiteral 四项统一排除，逐个登记只会**增加每个段的 dry run 成本、杀灭贡献为零**。本段不逐文件登记字面量表，同此纪律。"
       }
     }
   },
@@ -177,10 +232,10 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-host-trust.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/host-trust.test.ts"
           ],
           "comment": "#930 新域：一键生成本地 CA（三态判定 state.ts + POST 动作 actions.ts；forge 签发纯函数归 tls 域）。门面按 facade 口径进 coverageExcludes；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -188,13 +243,13 @@
           "mutate": ["packages/dsh-lan-proxy/src/server/config/impl/*.ts"],
           "excludes": [],
           "testFiles": [
-            "packages/dsh-lan-proxy/test/client-unit/client-routes.test.ts",
+            "packages/dsh-lan-proxy/test/client-unit/routes.test.ts",
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-host-trust.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/host-trust.test.ts"
           ],
           "comment": "#826 域归位：段按模块目录划分（与 src/server/<域>/ 一一对应），config 域 impl（model 原根 config.ts / routes 原根 config-routes.ts / namespace 原根 settings.ts）；门面按 facade 口径进 coverageExcludes；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -207,10 +262,10 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-host-trust.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/host-trust.test.ts"
           ],
           "comment": "#826 域归位：两个无模块目录归属的根文件合为 entry 段（mcp-manager / provider-usage 先例）——src/index.ts 是宿主唯一入口，tsconfig rootDir=src 要求它留在 src 根；server/apply.ts 是组合根装配。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -220,10 +275,10 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-host-trust.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/host-trust.test.ts"
           ],
           "comment": "#856 新域：host trust 兼容注入（非回环页面声明 ownsHost 的自条件脚本 + 官方 webServer.tapIndex 注册）。与 config/entry 同生命周期但独立成段——域内只有 impl/injection.ts 一个实现文件，错登进 entry 会让该段的 impl 变更信号被组合根噪声淹没；门面按 facade 口径进 coverageExcludes；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -236,10 +291,10 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-host-trust.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/host-trust.test.ts"
           ],
           "comment": "#826 域归位：migrate 域保留 config.json 收编与目录布局迁移；门面按 facade 口径进 coverageExcludes；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -249,8 +304,8 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-proxy.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/proxy.test.ts"
           ],
           "comment": "#826 域归位：proxy 域——代理实现（原根 proxy.ts，单文件千行级）；沿用 #220 B 段「大文件独占一段」口径；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -265,11 +320,11 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-apply.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-host-trust.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-proxy.test.ts"
+            "packages/dsh-lan-proxy/test/unit/apply.test.ts",
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/host-trust.test.ts",
+            "packages/dsh-lan-proxy/test/unit/proxy.test.ts"
           ],
           "comment": "#826 域归位：shared 叶子（重排时新提取的共用面——默认值 / WS 压缩策略 / 回环判定，域与配置 schema 同向依赖它）；门面按 facade 口径进 coverageExcludes；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -279,10 +334,10 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/integration/apply-token-provider.test.ts",
             "packages/dsh-lan-proxy/test/integration/entry-contract.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-ca.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-cacert.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-proxy.test.ts",
-            "packages/dsh-lan-proxy/test/unit/unit-tls.test.ts"
+            "packages/dsh-lan-proxy/test/unit/ca.test.ts",
+            "packages/dsh-lan-proxy/test/unit/cacert.test.ts",
+            "packages/dsh-lan-proxy/test/unit/proxy.test.ts",
+            "packages/dsh-lan-proxy/test/unit/tls.test.ts"
           ],
           "comment": "#826 域归位：tls 域（原根 cert.ts，自签证书签发与续期）；门面按 facade 口径进 coverageExcludes；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -295,7 +350,7 @@
           "testFiles": [
             "packages/dsh-lan-proxy/test/client-dom/settings-card.test.ts",
             "packages/dsh-lan-proxy/test/client-unit/ca-status.test.ts",
-            "packages/dsh-lan-proxy/test/client-unit/client-entry.test.ts",
+            "packages/dsh-lan-proxy/test/client-unit/entry.test.ts",
             "packages/dsh-lan-proxy/test/client-unit/host-trust-alert.test.ts",
             "packages/dsh-lan-proxy/test/client-unit/host-trust-status.test.ts"
           ],
@@ -331,25 +386,25 @@
           "testFiles": [
             "packages/dsh-mcp-manager/test/integration/real-context.test.ts",
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-call-stats.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-config-env-policy.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-config-env.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-lifecycle-mount.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-middleware.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-official-package-face.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction-a1.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-a2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-stats-a4.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-store.test.ts",
-            "packages/dsh-mcp-manager/test/client-unit/unit-summary-a3-guard.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-summary-a3.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-workspace-id.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-workspace.test.ts"
+            "packages/dsh-mcp-manager/test/unit/call-stats.test.ts",
+            "packages/dsh-mcp-manager/test/unit/config-env-policy.test.ts",
+            "packages/dsh-mcp-manager/test/unit/config-env.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/lifecycle-mount.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/middleware.test.ts",
+            "packages/dsh-mcp-manager/test/unit/official-package-face.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction-a1.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-a2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts",
+            "packages/dsh-mcp-manager/test/unit/stats-a4.test.ts",
+            "packages/dsh-mcp-manager/test/unit/store.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/summary-a3-guard.test.ts",
+            "packages/dsh-mcp-manager/test/unit/summary-a3.test.ts",
+            "packages/dsh-mcp-manager/test/unit/workspace-id.test.ts",
+            "packages/dsh-mcp-manager/test/unit/workspace.test.ts"
           ],
           "comment": "#767 B2b 重画：entry——组合根 src/index.ts + workspace（工作空间解析域）+ config（归一化/导入/schema）；B2b 后文件归各域段，本段只留这三处。W11b2a 删除 src/types 与 src/integration 后，原 types/integration 两条排除已是 0 命中死条目，随本刀删除；excludes 仅保留 client 一条（另一端）。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -359,19 +414,19 @@
           "testFiles": [
             "packages/dsh-mcp-manager/test/unit/ports/orchestrator-ports.test.ts",
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-call-stats.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-config-env-policy.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-init-failure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager-pure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction-a1.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-a2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-summary-a3.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-workspace.test.ts"
+            "packages/dsh-mcp-manager/test/unit/call-stats.test.ts",
+            "packages/dsh-mcp-manager/test/unit/config-env-policy.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/init-failure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager-pure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction-a1.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-a2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts",
+            "packages/dsh-mcp-manager/test/unit/summary-a3.test.ts",
+            "packages/dsh-mcp-manager/test/unit/workspace.test.ts"
           ],
           "comment": "#767 B2b 重画：manager——connection/orchestrator（McpManager 类主体与展示投影 tool-names）；B2b 后文件归各域段，本段只留这一处。W11b2a 删除 src/types 与 src/integration 后，原两条排除已成 0 命中死条目，随本刀删除；excludes 仅保留 client 一条（另一端）。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -390,19 +445,19 @@
             "packages/dsh-mcp-manager/test/unit/ports/inject-ports.test.ts",
             "packages/dsh-mcp-manager/test/unit/ports/runtime-ports.test.ts",
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-call-timeout.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-erasure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-image-admission.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-runtime-pure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-init-failure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-middleware.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-stats-a4.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-visibility.test.ts"
+            "packages/dsh-mcp-manager/test/unit/call-timeout.test.ts",
+            "packages/dsh-mcp-manager/test/unit/erasure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/image-admission.test.ts",
+            "packages/dsh-mcp-manager/test/unit/runtime-pure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/init-failure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/middleware.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts",
+            "packages/dsh-mcp-manager/test/unit/stats-a4.test.ts",
+            "packages/dsh-mcp-manager/test/unit/visibility.test.ts"
           ],
           "comment": "#767 B2b 重画：middleware——中间层池（runtime/middleware+limits）+端口持有者（runtime/impl/）+工具注册面（inject/）+策略裁决族（pipeline/impl/authorize/）+模型可见面域（visibility/，笔 1b 新增：把 mcp__* 从每个 agent 的模型视野摘掉的 restrict 机制）；B2b 后文件归各域段，本段只留这七处（第六处之后新增的是 visibility；#922 新增 erasure/ 装配侧兜底擦除，同属模型可见面）。原 pipeline/authorize.ts 是 B1 搬迁前的字面量、实测 0 命中（真实落点已变为 pipeline/impl/authorize/），本刀替换为目录 glob；W11b2a 删除 src/types 与 src/integration 后，原两条排除已成 0 命中死条目，随本刀删除；excludes 仅保留 client 一条（另一端）。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -412,11 +467,11 @@
           "testFiles": [
             "packages/dsh-mcp-manager/test/unit/ports/api-ports.test.ts",
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-config-env-policy.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-a2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts"
+            "packages/dsh-mcp-manager/test/unit/config-env-policy.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-a2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts"
           ],
           "comment": "#767 B2b 重画：routes——server/api（路由装配/端点控制器/查询辅助）；B2b 后文件归各域段，本段只留这一处。W11b2a 删除 src/types 与 src/integration 后，原两条排除已成 0 命中死条目，随本刀删除；excludes 仅保留 client 一条（另一端）。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -428,20 +483,20 @@
           "excludes": [],
           "testFiles": [
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-call-stats.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-config-env-policy.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-init-failure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-middleware.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction-a1.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-a2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-stats-a4.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-store.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-summary-a3.test.ts"
+            "packages/dsh-mcp-manager/test/unit/call-stats.test.ts",
+            "packages/dsh-mcp-manager/test/unit/config-env-policy.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/init-failure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/middleware.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction-a1.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-a2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts",
+            "packages/dsh-mcp-manager/test/unit/stats-a4.test.ts",
+            "packages/dsh-mcp-manager/test/unit/store.test.ts",
+            "packages/dsh-mcp-manager/test/unit/summary-a3.test.ts"
           ],
           "comment": "#767 B2b 重画：supervisor——状态持久化（store）+统计（stats）；B2b 后文件归各域段。段名保留（段只是 glob 容器，ID 还绑着 stryker.conf.d 的 jsonReporter/incremental 与 mutation-segment-ledger）：#767 S1-5c 删自研连接栈后，原连接监督器与重连策略两条 glob（runtime/supervisor.ts+runtime/reconnect.ts）已是 0 命中死条目，随本刀删除，不再换新落点——本笔没有新增源文件，段名退役会连带 baseline-archive 段数哨兵 + ledger superseded + AGENTS.md 三处。W11b2a 删除 src/types 与 src/integration 后，原两条排除已成 0 命中死条目，随本刀删除；excludes 仅保留 client 一条（另一端）。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -451,16 +506,16 @@
           "testFiles": [
             "packages/dsh-mcp-manager/test/unit/ports/lifecycle-ports.test.ts",
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-dispatch.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-lifecycle-logs.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-lifecycle-mount.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-middleware.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts"
+            "packages/dsh-mcp-manager/test/unit/dispatch.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/lifecycle-logs.test.ts",
+            "packages/dsh-mcp-manager/test/unit/lifecycle-mount.test.ts",
+            "packages/dsh-mcp-manager/test/unit/lifecycle.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/middleware.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts"
           ],
           "comment": "新增（#767 S1-2b）：servers——面向官方引擎的服务器域族（装载生命周期 servers/lifecycle + 派发 servers/dispatch（#767 S1-3a 落地）；injection 不在本段，其实现在 src/server/catalog/impl/injection/）。为什么新建段而不是塞进旧段：源码全覆盖断言要求 src 下每个文件落在 ∪mutate ∪ ∪excludes 内，而 src/server/servers/** 不被既有任何段的 glob 覆盖；旧段的 comment 与文件归属也会因此失真。excludes 照同包其余段，仅保留 client 一条（另一端），不构成宿主侧变异面。测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建（D7 迁移豁免）。"
         },
@@ -478,29 +533,29 @@
             "packages/dsh-mcp-manager/test/unit/ports/catalog-ports.test.ts",
             "packages/dsh-mcp-manager/test/unit/ports/pipeline-ports.test.ts",
             "packages/dsh-mcp-manager/test/integration/apply-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-call-stats.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-call-timeout.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-catalog.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-catalog-pure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-config-env-policy.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-dispatch.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-file-io-queue.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-file-io.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-hotspot.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-init-failure.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-lifecycle-mount.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-lifecycle.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-manager2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-middleware.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-pipeline.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction-a1.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-redaction.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-a2.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-routes-sse.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-stats-a4.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-store.test.ts",
-            "packages/dsh-mcp-manager/test/unit/unit-summary-a3.test.ts",
+            "packages/dsh-mcp-manager/test/unit/call-stats.test.ts",
+            "packages/dsh-mcp-manager/test/unit/call-timeout.test.ts",
+            "packages/dsh-mcp-manager/test/unit/catalog.test.ts",
+            "packages/dsh-mcp-manager/test/unit/catalog-pure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/config-env-policy.test.ts",
+            "packages/dsh-mcp-manager/test/unit/dispatch.test.ts",
+            "packages/dsh-mcp-manager/test/unit/file-io-queue.test.ts",
+            "packages/dsh-mcp-manager/test/unit/file-io.test.ts",
+            "packages/dsh-mcp-manager/test/unit/hotspot.test.ts",
+            "packages/dsh-mcp-manager/test/unit/init-failure.test.ts",
+            "packages/dsh-mcp-manager/test/unit/lifecycle-mount.test.ts",
+            "packages/dsh-mcp-manager/test/unit/lifecycle.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager.test.ts",
+            "packages/dsh-mcp-manager/test/unit/manager2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/middleware.test.ts",
+            "packages/dsh-mcp-manager/test/unit/pipeline.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction-a1.test.ts",
+            "packages/dsh-mcp-manager/test/unit/redaction.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-a2.test.ts",
+            "packages/dsh-mcp-manager/test/unit/routes-sse.test.ts",
+            "packages/dsh-mcp-manager/test/unit/stats-a4.test.ts",
+            "packages/dsh-mcp-manager/test/unit/store.test.ts",
+            "packages/dsh-mcp-manager/test/unit/summary-a3.test.ts",
             "packages/dsh-mcp-manager/test/unit/upgrade/steps.test.ts",
             "packages/dsh-mcp-manager/test/unit/upgrade/storage-layout.test.ts"
           ],
@@ -521,12 +576,12 @@
           ],
           "excludes": [],
           "testFiles": [
-            "packages/dsh-mcp-manager/test/client-unit/client-context-s2.test.ts",
-            "packages/dsh-mcp-manager/test/client-unit/client-core-api.test.ts",
-            "packages/dsh-mcp-manager/test/client-unit/client-core-constants.test.ts",
-            "packages/dsh-mcp-manager/test/client-unit/client-core-i18n.test.ts",
-            "packages/dsh-mcp-manager/test/client-unit/client-locales.test.ts",
-            "packages/dsh-mcp-manager/test/client-unit/client-float-pure.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/context-s2.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/core-api.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/core-constants.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/core-i18n.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/locales.test.ts",
+            "packages/dsh-mcp-manager/test/client-unit/float-pure.test.ts",
             "packages/dsh-mcp-manager/test/client-dom/core-dom.test.ts",
             "packages/dsh-mcp-manager/test/client-dom/float-panel-mount.test.ts",
             "packages/dsh-mcp-manager/test/client-dom/float-pill-render.test.ts",
@@ -535,7 +590,7 @@
             "packages/dsh-mcp-manager/test/client-dom/panel-aria-modal.test.ts",
             "packages/dsh-mcp-manager/test/client-dom/settings-card.test.ts"
           ],
-          "comment": "新增（#947）：面板 aria-modal 同步 + opener 还焦 + Esc 让位——直连判据两份（test/client-dom/panel-aria-modal.test.ts，happy-dom 直连 src；test/client-unit/client-context-s2.test.ts，P3-b/B5 S2 ctx 最小面直测，所测 state.ts 归属本段、session/float 暂无归属段故同落，k 约 0）。P3-b/B6 并入 settings-card 直测（test/client-dom/settings-card.test.ts，happy-dom 直连 settings-card.tsx 六映射 L25/L37/L56/L67/L80/L136，所测 settings-card.tsx 暂无归属段故同落本段，k 约 0；不新建段）。只含本次有判据的三文件，其余客户端文件仍由覆盖率按面收窄逐个移入；float.ts Esc 一行暂无直连判据，随后续补判据后移入本段。core/i18n.ts（tStatus 已知/未知两支）随「一条豁免一次落地」批次以 test/client-unit/client-core-i18n.test.ts 直连判据入面：字面量键锚 + 恒等绑定两支，变异探针（两支对调）exit 1。 client/locales.ts（双语字典）以 test/client-unit/client-locales.test.ts 入面：**91 条键 × zh/en 的全量字面量镜像** + 键平衡 / 占位符配对 / 非空四条机械判据。**它不贡献变异分**——纯字面量表在 sharedDefaults.excludedMutations（StringLiteral/ObjectLiteral/ArrayLiteral/TemplateLiteral）下产不出变异体，这与 dsh-notifier channels 段的 refusal.ts「纯数据无变异体」同型，是仓内已承认的一类（见本文件 dsh-notifier 段 channels 注释：纯数据字面量由 excludedMutations 排除）；登记它是为了让「该文件已在 mutate 面」这一持续执法事实成立，真实信号来自字面量镜像与变异探针，不拿它充变异分。 core/dom.ts（pangu 与 el 的属性通道）以 test/client-dom/core-dom.test.ts 入面：25 例覆盖 pangu 四向插空 + 连字符不撕开、el 的七条属性通道归属（class/text/dataset/on*/checked/disabled/其余 setAttribute）、子节点两种传法与 null 跳过。该文件此前是台账点名的第二个假达标（94.44% 全是渲染路径顺带执行，pangu 恒等化与 class 通道改道均 exit 0），本轮后同一手法 exit 1。 core/constants.ts（状态映射与路径投影）以 test/client-unit/client-core-constants.test.ts 入面：11 例把 statusDot 六态配色、STATUS_ORDER 展示次序与 titleKey、STATUS_TEXT 六态字典键、API 11 条路由键面全部用**手写字面量**钉住（期望值不从被测实现 import，testing SKILL §6 同源期望禁令）；本文件贡献真实变异分（非纯字面量表，有 statusDot 的真分支与真函数）。 core/api.ts（请求参数拼装与 HTTP 请求面）以 test/client-unit/client-core-api.test.ts 入面：23 例覆盖 toolDisableServerKey 的两种全名形态与 projectRoot 三种 undefined 回落、cwdQueryOf 的编码与空回落、api() 的 2xx/非 2xx error/无 error 兜底/body 解析失败两支、调用方自带 signal 时不装超时兜底（推钟后仍不 abort，双取消竞争这条存在的理由）、抛错路径定时器同样清掉；fetch 假件为 globalThis 上的手写替身（SKILL §3 允许的例外），不用 vi.mock/fn/spyOn。 float/servers.ts（服务器列表页渲染与动作面）以 test/client-dom/float-servers-render.test.ts 入面：49 例覆盖 18 个此前零判据的渲染/动作函数——端点摘要两形态、状态动作三档 URL/query、禁用/删除 method+body、delete 的 confirm 闸（未确认零请求）、编辑中才 resetForm、actionButton 失败 alert、单卡结构与 busy 态禁用删除、列表页空态/需关注置顶/project+global 分组/组内排序/details 折叠态跨重渲染恢复。该文件是 float/ 三件里最轻的（400 行），先落地；quick-add.ts 与 float.ts 待各自补齐后单独入面。 float/quick-add.ts（快速接入表单与 JSON 导入）以 test/client-dom/float-quick-add-form.test.ts 入面：76 例覆盖此前零判据的 buildQuickAdd（10 个表单控件 + transport 显隐切换 + 粘贴导入三态）、saveForm / performSaveRequest 三种落点（含「原条目有凭据时迁移无条件中止」这条 M7 纪律）、fillForm 回填、resetForm、beginEdit。float/ 三件中至此只剩 float.ts 未入面。float/float.ts 的**胶囊与渲染层**判据已由 test/client-dom/float-pill-render.test.ts 落地（8a），但该文件条件①在本笔**尚未成立**（实测 lines 193/335 = 57.61%、branches 144/231 = 62.34%，阈值 80/70）：placePanel / toggleFloat / mountFloat / conversationHost / panelHost / dockedBottomEdge 六块共 163 条语句与 22 个函数仍无判据。故本笔**不把 float.ts 登记进 mutate**——Stryker 按文件变异，把一份 57% 覆盖的 838 行文件塞进 client-panel 段会一次性注入大量注定存活的变异体，代价由该段其余七个文件共同承担。8b（浮窗面板与挂载层）以 test/client-dom/float-panel-mount.test.ts 补齐 placePanel / toggleFloat / mountFloat / conversationHost / panelHost / dockedBottomEdge 后，双条件成立（实测 lines 316/335 = 94.33%、branches 201/231 = 87.01%，阈值 80/70），本文件于 8b 入面并同时删条目。**8a 刻意不登记是正确的**：按维护者裁定，「进入 mutate 面」是收口的最后一步而非与水位并列的先决条件——Stryker 按文件变异，判据未齐时登记会向共用段注入注定存活的变异体。"
+          "comment": "新增（#947）：面板 aria-modal 同步 + opener 还焦 + Esc 让位——直连判据两份（test/client-dom/panel-aria-modal.test.ts，happy-dom 直连 src；test/client-unit/context-s2.test.ts，P3-b/B5 S2 ctx 最小面直测，所测 state.ts 归属本段、session/float 暂无归属段故同落，k 约 0）。P3-b/B6 并入 settings-card 直测（test/client-dom/settings-card.test.ts，happy-dom 直连 settings-card.tsx 六映射 L25/L37/L56/L67/L80/L136，所测 settings-card.tsx 暂无归属段故同落本段，k 约 0；不新建段）。只含本次有判据的三文件，其余客户端文件仍由覆盖率按面收窄逐个移入；float.ts Esc 一行暂无直连判据，随后续补判据后移入本段。core/i18n.ts（tStatus 已知/未知两支）随「一条豁免一次落地」批次以 test/client-unit/core-i18n.test.ts 直连判据入面：字面量键锚 + 恒等绑定两支，变异探针（两支对调）exit 1。 client/locales.ts（双语字典）以 test/client-unit/locales.test.ts 入面：**91 条键 × zh/en 的全量字面量镜像** + 键平衡 / 占位符配对 / 非空四条机械判据。**它不贡献变异分**——纯字面量表在 sharedDefaults.excludedMutations（StringLiteral/ObjectLiteral/ArrayLiteral/TemplateLiteral）下产不出变异体，这与 dsh-notifier channels 段的 refusal.ts「纯数据无变异体」同型，是仓内已承认的一类（见本文件 dsh-notifier 段 channels 注释：纯数据字面量由 excludedMutations 排除）；登记它是为了让「该文件已在 mutate 面」这一持续执法事实成立，真实信号来自字面量镜像与变异探针，不拿它充变异分。 core/dom.ts（pangu 与 el 的属性通道）以 test/client-dom/core-dom.test.ts 入面：25 例覆盖 pangu 四向插空 + 连字符不撕开、el 的七条属性通道归属（class/text/dataset/on*/checked/disabled/其余 setAttribute）、子节点两种传法与 null 跳过。该文件此前是台账点名的第二个假达标（94.44% 全是渲染路径顺带执行，pangu 恒等化与 class 通道改道均 exit 0），本轮后同一手法 exit 1。 core/constants.ts（状态映射与路径投影）以 test/client-unit/core-constants.test.ts 入面：11 例把 statusDot 六态配色、STATUS_ORDER 展示次序与 titleKey、STATUS_TEXT 六态字典键、API 11 条路由键面全部用**手写字面量**钉住（期望值不从被测实现 import，testing SKILL §6 同源期望禁令）；本文件贡献真实变异分（非纯字面量表，有 statusDot 的真分支与真函数）。 core/api.ts（请求参数拼装与 HTTP 请求面）以 test/client-unit/core-api.test.ts 入面：23 例覆盖 toolDisableServerKey 的两种全名形态与 projectRoot 三种 undefined 回落、cwdQueryOf 的编码与空回落、api() 的 2xx/非 2xx error/无 error 兜底/body 解析失败两支、调用方自带 signal 时不装超时兜底（推钟后仍不 abort，双取消竞争这条存在的理由）、抛错路径定时器同样清掉；fetch 假件为 globalThis 上的手写替身（SKILL §3 允许的例外），不用 vi.mock/fn/spyOn。 float/servers.ts（服务器列表页渲染与动作面）以 test/client-dom/float-servers-render.test.ts 入面：49 例覆盖 18 个此前零判据的渲染/动作函数——端点摘要两形态、状态动作三档 URL/query、禁用/删除 method+body、delete 的 confirm 闸（未确认零请求）、编辑中才 resetForm、actionButton 失败 alert、单卡结构与 busy 态禁用删除、列表页空态/需关注置顶/project+global 分组/组内排序/details 折叠态跨重渲染恢复。该文件是 float/ 三件里最轻的（400 行），先落地；quick-add.ts 与 float.ts 待各自补齐后单独入面。 float/quick-add.ts（快速接入表单与 JSON 导入）以 test/client-dom/float-quick-add-form.test.ts 入面：76 例覆盖此前零判据的 buildQuickAdd（10 个表单控件 + transport 显隐切换 + 粘贴导入三态）、saveForm / performSaveRequest 三种落点（含「原条目有凭据时迁移无条件中止」这条 M7 纪律）、fillForm 回填、resetForm、beginEdit。float/ 三件中至此只剩 float.ts 未入面。float/float.ts 的**胶囊与渲染层**判据已由 test/client-dom/float-pill-render.test.ts 落地（8a），但该文件条件①在本笔**尚未成立**（实测 lines 193/335 = 57.61%、branches 144/231 = 62.34%，阈值 80/70）：placePanel / toggleFloat / mountFloat / conversationHost / panelHost / dockedBottomEdge 六块共 163 条语句与 22 个函数仍无判据。故本笔**不把 float.ts 登记进 mutate**——Stryker 按文件变异，把一份 57% 覆盖的 838 行文件塞进 client-panel 段会一次性注入大量注定存活的变异体，代价由该段其余七个文件共同承担。8b（浮窗面板与挂载层）以 test/client-dom/float-panel-mount.test.ts 补齐 placePanel / toggleFloat / mountFloat / conversationHost / panelHost / dockedBottomEdge 后，双条件成立（实测 lines 316/335 = 94.33%、branches 201/231 = 87.01%，阈值 80/70），本文件于 8b 入面并同时删条目。**8a 刻意不登记是正确的**：按维护者裁定，「进入 mutate 面」是收口的最后一步而非与水位并列的先决条件——Stryker 按文件变异，判据未齐时登记会向共用段注入注定存活的变异体。"
         }
       },
       "testLayers": {
@@ -558,7 +613,7 @@
         ],
         "testMutationExemptions": {
           "unit": {
-            "packages/dsh-mcp-manager/test/unit/unit-shared.test.ts": "被测对象是 workspace 根 shared/settings-namespace.ts（不在本包 mutate 面内），登记它零杀灭、只增加各段 dry run 执行面"
+            "packages/dsh-mcp-manager/test/unit/shared.test.ts": "被测对象是 workspace 根 shared/settings-namespace.ts（不在本包 mutate 面内），登记它零杀灭、只增加各段 dry run 执行面"
           },
           "integration": {
             "packages/dsh-mcp-manager/test/integration/service-contract.test.ts": "契约编译面用例：静态读取 src/index.ts 的源文本比对 provide 方法集；在 Stryker 沙箱内被测源码已插桩，源文本断言必然失败（CI 实测 2026-09-11：Mutation gate (dsh-mcp-manager · runtime) dry run 报 apply.ts provide(\"mcpManager\") 方法名集合应与契约清单一致）。该用例的价值是类型/编译面与契约清单漂移，不产生变异杀灭，故不进变异面（随 pnpm test:scripts 的 service-contract-wiring 与 pnpm typecheck 生效）"
@@ -817,7 +872,7 @@
           "excludes": [],
           "testFiles": [
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts"
           ],
           "comment": "#342 v4：src 级文件组分段（2）——apply 单列（#316 拆分后最重文件独立成段）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -826,9 +881,9 @@
           "excludes": [],
           "testFiles": [
             "packages/dsh-provider-usage/test/integration/ui-routes/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/common/unit-errsurf.test.ts",
-            "packages/dsh-provider-usage/test/unit/server-shared/unit-s2-contracts.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/common/errsurf.test.ts",
+            "packages/dsh-provider-usage/test/unit/server-shared/s2-contracts.test.ts"
           ],
           "comment": "#670 阶段三 B 新段：域2每层错误面——errsurf.ts（累计计数+最近 N 条环形缓冲+snapshot/noop）；testFiles 含 unit-errsurf（杀灭面）；apply 接线与 routes/ui health per-layer 段由既有 apply/routes 段覆盖（mutate 已含对应文件）。#768 S2：canonical 实现迁 server/shared/errsurf.ts（Q5 尺子见文件头），domain2/common/errsurf.ts 过渡垫片 D13 已删（common 目录消除，旧路径引用同步切 server/shared）；杀灭面含 unit-s2-contracts（新叶直连判据）。"
         },
@@ -844,16 +899,16 @@
             "packages/dsh-provider-usage/test/integration/history/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/pipeline/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/registry/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/adapters/unit-deepseek-official.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/common/unit-errsurf.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-signal-lock.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
-            "packages/dsh-provider-usage/test/unit/registry/unit-hotreload.test.ts",
-            "packages/dsh-provider-usage/test/unit/routes/unit-refactor-pure.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-chart.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
-            "packages/dsh-provider-usage/test/unit/adapters/unit-adapters-pure.test.ts"
+            "packages/dsh-provider-usage/test/unit/adapters/deepseek-official.test.ts",
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/common/errsurf.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/signal-lock.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/stats-service.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/hotreload.test.ts",
+            "packages/dsh-provider-usage/test/unit/routes/refactor-pure.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/chart.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/contract.test.ts",
+            "packages/dsh-provider-usage/test/unit/adapters/adapters-pure.test.ts"
           ],
           "comment": "#342 v4：src 级文件组分段（3）——contracts+server/pipeline/guards（契约面，#768 D6 随域改址）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -872,12 +927,12 @@
             "packages/dsh-provider-usage/test/integration/registry/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/ui-routes/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-config.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts",
-            "packages/dsh-provider-usage/test/unit/registry/unit-registry-pure.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/stats-service.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/config.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/contract.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/registry-pure.test.ts"
           ],
           "comment": "#342 v4：src 级文件组分段（1）——index+user-adapters+ui-config+config（配置/入口面）；#768 D7 注册表文件随域迁 server/registry（路径同步，行为零改 + 双启用判据）；#768 D13 包根入口 src/index.ts 落地（apply/index.ts 显式具名薄转发，导出面零漂移）并入本段；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -885,9 +940,9 @@
           "mutate": ["packages/dsh-provider-usage/src/server/history/history.ts"],
           "excludes": [],
           "testFiles": [
-            "packages/dsh-provider-usage/test/unit/history/unit-history.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/history/history.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend.test.ts",
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
             "packages/dsh-provider-usage/test/integration/history/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts"
           ],
@@ -903,16 +958,16 @@
           ],
           "excludes": [],
           "testFiles": [
-            "packages/dsh-provider-usage/test/unit/shared/unit-config.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
-            "packages/dsh-provider-usage/test/unit/adapters/unit-deepseek-official.test.ts",
-            "packages/dsh-provider-usage/test/unit/registry/unit-hotreload.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-signal-lock.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/config.test.ts",
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/stats-service.test.ts",
+            "packages/dsh-provider-usage/test/unit/adapters/deepseek-official.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/hotreload.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/contract.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/signal-lock.test.ts",
             "packages/dsh-provider-usage/test/integration/pipeline/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/registry/unit-registry-pure.test.ts"
+            "packages/dsh-provider-usage/test/unit/registry/registry-pure.test.ts"
           ],
           "comment": "#962 A 拆大段（三向之一：管线-注册表服务面）——原 pipeline 段的 v2/stats-service（#768 D6 随域迁 server/pipeline，净化缺席判据；阶段零补 stats-service 盲区）+ hotreload/path-resolve/provider-config（#768 D7 随域迁 server/registry，双启用判据）；testFiles 原样继承原段 22 个（零收窄，理由同 pipeline-history）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -924,9 +979,9 @@
           ],
           "excludes": [],
           "testFiles": [
-            "packages/dsh-provider-usage/test/unit/shared/unit-config.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/config.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts"
           ],
           "comment": "#962 A 拆大段（三向之一：展示纯逻辑面）——原 pipeline 段的 placement-math/client-logic/charts 三纯逻辑文件（charts 纳入修复变异盲区）；testFiles 原样继承原段 22 个（零收窄，理由同 pipeline-history）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
@@ -942,10 +997,10 @@
             "packages/dsh-provider-usage/test/integration/adapters/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/pipeline/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/registry/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts",
-            "packages/dsh-provider-usage/test/unit/registry/unit-registry-pure.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/stats-service.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/contract.test.ts",
+            "packages/dsh-provider-usage/test/unit/registry/registry-pure.test.ts"
           ],
           "comment": "#342 二期：功能命名段（registry）——registry+user-adapter-loader（注册表域，25s；阶段零补 loader 盲区）；#768 D4 并入 server/adapters/register.ts（内置装配 fail-fast，杀灭面为 test/integration/adapters/composition-root）；#768 D7 注册表两文件随域迁 server/registry（路径同步，行为零改 + 双启用判据，杀灭面新增 test/integration/registry/composition-root）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -955,12 +1010,12 @@
           "testFiles": [
             "packages/dsh-provider-usage/test/integration/collect/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/pipeline/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/adapters/unit-deepseek-official.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-signal-lock.test.ts",
-            "packages/dsh-provider-usage/test/unit/pipeline/unit-stats-service.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-chart.test.ts",
-            "packages/dsh-provider-usage/test/unit/shared/unit-contract.test.ts"
+            "packages/dsh-provider-usage/test/unit/adapters/deepseek-official.test.ts",
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/signal-lock.test.ts",
+            "packages/dsh-provider-usage/test/unit/pipeline/stats-service.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/chart.test.ts",
+            "packages/dsh-provider-usage/test/unit/shared/contract.test.ts"
           ],
           "comment": "#342 二期：功能命名段（sanitize）——sanitize（数据净化域，115s）；测试按段 testFiles 清单跑（perTest 关联）；incremental 基线随 observe 夜间全量班重建。"
         },
@@ -976,10 +1031,10 @@
           "testFiles": [
             "packages/dsh-provider-usage/test/integration/aggregate/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend-ledger.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts",
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend-ledger.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend.test.ts",
             "packages/dsh-provider-usage/test/client-dom/trend-section.test.ts"
           ],
           "comment": "阶段零新段（D17 分层变异）：E2 聚合/压实/存储面——aggregator+store+index；阶段三（#670 D2）aggregator 拆分为 aggregate-rows（压实转换纯函数）+ aggregate-query（查询投影纯函数），两新文件并入 mutate 面（防新文件变异盲区）；testFiles 含 unit-trend/unit-trend-ledger/unit-trend-view（杀灭面为该层测试，R8 台账守恒断言覆盖守恒链）；#768 D8 聚合五文件随域迁 server/aggregate（路径同步 + deletePromises 注解 + A4(f)补dir + forgetPersisted 删除，杀灭面新增 test/integration/aggregate/composition-root）；aggregator 单文件 5-8 分钟，独立段防超时。"
@@ -995,13 +1050,13 @@
             "packages/dsh-provider-usage/test/integration/aggregate/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/collect/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report-executor.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend-ledger.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend-sanitize-dir.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend-shard-row.test.ts",
-            "packages/dsh-provider-usage/test/unit/trend/unit-trend.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report-executor.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend-ledger.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend-sanitize-dir.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend-shard-row.test.ts",
+            "packages/dsh-provider-usage/test/unit/trend/trend.test.ts"
           ],
           "comment": "阶段零新段（D17 分层变异）：E1 事件采集面——collector+types（折叠状态机/归属归一）；testFiles 含 unit-trend（杀灭面为该层测试）；#768 D9 采集两文件随域迁 server/collect（路径同步，零行为变更，杀灭面新增 test/integration/collect/composition-root）。"
         },
@@ -1029,13 +1084,13 @@
             "packages/dsh-provider-usage/test/integration/report-routes/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/upgrade/upgrade-chain.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/common/unit-errsurf.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report-b2-3.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report-executor.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
-            "packages/dsh-provider-usage/test/unit/server-shared/unit-s2-contracts.test.ts",
-            "packages/dsh-provider-usage/test/unit/schedule/unit-schedule-pure.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/common/errsurf.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report-b2-3.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report-executor.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report.test.ts",
+            "packages/dsh-provider-usage/test/unit/server-shared/s2-contracts.test.ts",
+            "packages/dsh-provider-usage/test/unit/schedule/schedule-pure.test.ts"
           ],
           "comment": "阶段零新段（D17 分层变异）：E3 报告调度面——schedule+scheduler+tasks；阶段二（D8）并入 last-run.ts（公共原语）；#768 D1 起配置面归 server/config 域（shape/prompts/normalize/store/service）；#768 D2 起调度面整域归 server/schedule（due/scheduler/tasks/store，domain2/schedule 与 common/last-run 旧址删除，interface.ts/deps.ts 以 facade/type-only 口径排除）；#1010 B1 纳入 retry-policy/retry-ledger（纯状态机 + durable JSON/CAS/recover）；testFiles 含 unit-report/unit-report-executor + test/integration/schedule/composition-root（状态/持久化、串行锁与门面装配判据）。"
         },
@@ -1053,10 +1108,10 @@
             "packages/dsh-provider-usage/test/integration/execute/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/report-routes/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report-b2-3.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report-executor.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report-b2-3.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report-executor.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report.test.ts"
           ],
           "comment": "阶段零新段（D17 分层变异）：E4 报告执行/产出面——runner+generate+format；阶段二（D8）并入 report-index.ts（公共解析）/executor.ts（执行器工厂）/list-dirs.ts（目录候选工厂）；#768 D3 起整域归 server/execute（6 文件物理迁移，interface.ts/deps.ts 以 facade/type-only 口径排除）；testFiles 含 unit-report/unit-report-executor + test/integration/execute/composition-root（门面装配与记忆化判据）+ test/integration/schedule/composition-root（D3三-轮询否定 toFake 面）。"
         },
@@ -1077,11 +1132,11 @@
             "packages/dsh-provider-usage/test/integration/report-routes/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/ui-routes/composition-root.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts",
-            "packages/dsh-provider-usage/test/unit/common/unit-errsurf.test.ts",
-            "packages/dsh-provider-usage/test/unit/report/unit-report.test.ts",
-            "packages/dsh-provider-usage/test/unit/routes/unit-refactor-pure.test.ts",
-            "packages/dsh-provider-usage/test/unit/routes/unit-routes.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts",
+            "packages/dsh-provider-usage/test/unit/common/errsurf.test.ts",
+            "packages/dsh-provider-usage/test/unit/report/report.test.ts",
+            "packages/dsh-provider-usage/test/unit/routes/refactor-pure.test.ts",
+            "packages/dsh-provider-usage/test/unit/routes/routes.test.ts"
           ],
           "comment": "阶段一新段（评审 P1-5 前置）：E5/C6 路由面——stats+adapters+ui+reports；先抽纯函数（clampTrendN/isReportPeriodValid/isReportKeyValid/isTaskIdValid）补 unit-routes 再开段；testFiles 含 unit-routes/unit-report/unit-apply；#768 D10 stats/adapters 两文件由 domain1/routes 改名迁 server/data-routes（路径同步，零行为变更，杀灭面新增 test/integration/data-routes/composition-root）；#768 D11 reports 由 domain2/routes 迁 server/report-routes（interface 门面 + deps 注入面 + 配置窄口消费，零行为变更，杀灭面新增 test/integration/report-routes/composition-root，逆序释放判据锁定）；#768 D12 ui 四块（health/trend/ui-config/events）+ 装配形状（context）由 domain2/routes 迁 server/ui-routes（一域四块不升域，interface 门面 + deps 注入面 + 广播窄口，零行为变更，杀灭面新增 test/integration/ui-routes/composition-root，健康读 errsurf 与 SSE 非可靠判据锁定）。"
         },
@@ -1091,7 +1146,7 @@
           "testFiles": [
             "packages/dsh-provider-usage/test/integration/schedule/composition-root.test.ts",
             "packages/dsh-provider-usage/test/integration/upgrade/upgrade-chain.test.ts",
-            "packages/dsh-provider-usage/test/unit/apply/unit-apply.test.ts"
+            "packages/dsh-provider-usage/test/unit/apply/apply.test.ts"
           ],
           "comment": "#768 S3 新段：upgrade 迁移链——storage-layout（纯字节归位）+config-morph（LEGACY 映射割接）+last-run-morph（derive/align）+chain（排序/刻度/对账）+service（装配标记）+version（刻度读写）；interface.ts/deps.ts 经包级 coverageExcludes 以 facade/type-only 口径排除；杀灭面为 test/integration/upgrade/upgrade-chain（幂等三条各有集成用例）。"
         }
@@ -1116,7 +1171,7 @@
           {
             "pattern": "!packages/dsh-provider-usage/src/server/adapters/deepseek-official.mjs",
             "kind": "not-mutated",
-            "reason": "内置 DeepSeek 官方余额适配器的权威实现（区间记账法 classifyIntervalDs/aggregateDaily、B2 断轴 balanceSvg、峰谷徽标）：构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/server/adapters/（tsc 不 emit .mjs），它本身在覆盖率面内计分、但不进 .ts 域变异段；变异行为面由 test/unit/adapters/unit-deepseek-official.test.ts 直测；#768 D4 随域迁 server/adapters（文件零改动）。"
+            "reason": "内置 DeepSeek 官方余额适配器的权威实现（区间记账法 classifyIntervalDs/aggregateDaily、B2 断轴 balanceSvg、峰谷徽标）：构建期由包内 scripts/prepare-lib-entry.ts 原样拷入 lib/server/adapters/（tsc 不 emit .mjs），它本身在覆盖率面内计分、但不进 .ts 域变异段；变异行为面由 test/unit/adapters/deepseek-official.test.ts 直测；#768 D4 随域迁 server/adapters（文件零改动）。"
           },
           {
             "pattern": "!packages/dsh-provider-usage/src/server/adapters/opencode-go.mjs",
@@ -1147,10 +1202,10 @@
             "packages/dsh-worktree-sidebar/test/integration/tools-real.test.ts",
             "packages/dsh-worktree-sidebar/test/unit/api-routes.test.ts",
             "packages/dsh-worktree-sidebar/test/unit/binding-model.test.ts",
-            "packages/dsh-worktree-sidebar/test/client-unit/client-bindings.test.ts",
-            "packages/dsh-worktree-sidebar/test/client-unit/client-index.test.ts",
-            "packages/dsh-worktree-sidebar/test/client-unit/client-source.test.ts",
-            "packages/dsh-worktree-sidebar/test/client-unit/client-takeover.test.ts",
+            "packages/dsh-worktree-sidebar/test/client-unit/bindings.test.ts",
+            "packages/dsh-worktree-sidebar/test/client-unit/index.test.ts",
+            "packages/dsh-worktree-sidebar/test/client-unit/source.test.ts",
+            "packages/dsh-worktree-sidebar/test/client-unit/takeover.test.ts",
             "packages/dsh-worktree-sidebar/test/unit/git-inspect.test.ts",
             "packages/dsh-worktree-sidebar/test/unit/git-service.test.ts",
             "packages/dsh-worktree-sidebar/test/unit/host-agents.test.ts",

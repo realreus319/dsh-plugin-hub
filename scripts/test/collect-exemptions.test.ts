@@ -158,7 +158,7 @@ test("本仓真实快照：15 条在册（数字变即提示同步台账与 #765
   //   客户端单测 10 条的 I8① 证据全部清零（迁 test/client-unit / 改直连域门面 / 入口契约
   //   判据迁集成层），11 条随证据消失按反向腐烂校验删除，27 → 16。
   // #T1A：mcp-manager 客户端 core/session.ts 那条已陈旧（实测 lines 100% / branches 95.45%，
-  //   且其 reason「尚无直连判据」为假——test/client-unit/client-context-s2.test.ts:19 直接导入
+  //   且其 reason「尚无直连判据」为假——test/client-unit/context-s2.test.ts:19 直接导入
   //   bindSession / rebindSession），随删除消失，覆盖率部分 14 → 13，16 → 15。同批评的 9 条
   //   只改 exitCriteria 措辞、不增删条目，故台账数不再变。
   // 本 PR：**台账数不变（15）**。处理了 4 条 pending-project 但一条未删——
@@ -167,7 +167,8 @@ test("本仓真实快照：15 条在册（数字变即提示同步台账与 #765
   //   shared/client/** 只改 reason 与 exitCriteria。收窄与改写都不增删条目。
   const r = spawnSync(process.execPath, [SCRIPT], { cwd: ROOT, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /合计 7 条待办：已过期 0 /);
+  // #1074 清掉 shared/client/** 那条 pending-project 豁免 ⇒ 台账 7 → 6。
+  assert.match(r.stdout, /合计 6 条待办：已过期 0 /);
   assert.match(r.stdout, /仅解除条件（无到期日）1/);
   // crap.strict 的解除条件必须在台账里（只写日期会逼出「到期了再讨论一次」）
   assert.match(r.stdout, /\$\.crap {2}threshold=16/);
@@ -263,22 +264,29 @@ test("未识别 kind 落待办兜底并点名依据（多算不少算，漂移�
   assert.match(r.stdout, /合计 1 条待办/);
 });
 
-test("本仓真实快照：排除面按 kind 分为 5 + 16 结构性，合计待办 7 条", () => {
+// 名字即口径：两个来源各自的结构性条数相加得「结构性合计」，结构性之外才是待办。
+// 订正记录：#1074 之前本用例名写「5 + 16 结构性，合计待办 7 条」而断言体是 13/16/6 —— 名字与断言
+// 早就不自洽（漂移在 #1074 之前就有，不是它造成的），会让下一个读它的人重新困惑一遍，故一并订正。
+test("本仓真实快照：排除面 14（覆盖率面）+ 16（变异面）= 结构性 30 条，待办 6 条", () => {
   const r = spawnSync(process.execPath, [SCRIPT, "--today", "2026-09-28"], {
     cwd: ROOT,
     encoding: "utf8",
   });
   assert.equal(r.status, 0, r.stderr);
-  // 覆盖率面：13 条 type-only / not-source 不计入待办（本仓实测值，数字变即提示同步判词）
-  assert.match(r.stdout, /结构性 13 条（不计入待办）：not-source×11、type-only×2/);
-  // 变异面 coverageExcludes：16 条全是结构性的（facade / not-mutated / type-only / not-source）
+  // 来源一 = coverage.config.json 的 exclude（共 18 条 = 4 条 pending-project + 14 条结构性）：
+  // 14 条 type-only / not-source 不计入待办（本仓实测值，数字变即提示同步判词）。
+  // #1074 增一条 shared/test/shared-client.mutation.test.ts 的 not-source 排除，故 13→14、not-source 11→12；
+  // 同笔删掉 shared/client/** 那条 pending-project，带 reviewBy 的条数 5→4。
+  assert.match(r.stdout, /结构性 14 条（不计入待办）：not-source×12、type-only×2/);
+  // 来源二 = mutation-topology 的 coverageExcludes：16 条**全是**结构性的
+  // （facade / not-mutated / type-only / not-source），该面按设计不产生待办。
   assert.match(
     r.stdout,
     /结构性 16 条（不计入待办）：facade×4、not-mutated×4、not-source×1、type-only×7/,
   );
-  // 5 条 pending-project + gauntlet 1 + gate-exemptions 1 = 7 条待办
-  // （已删 mcp-manager core/i18n.ts、client/locales.ts、core/dom.ts、core/constants.ts、core/api.ts、
-  //  进 mutation-topology mutate 面 + 变异探针打红；一条豁免一次落地）
-  assert.match(r.stdout, /合计 7 条待办/);
-  assert.match(r.stdout, /结构性（按设计不计入待办）29/);
+  // 结构性合计 = 14 + 16 = 30（判据自己算的这行）；待办 6 条来自**另外三个**来源，与上两项不相加：
+  //   4 条 pending-project（coverage 面，带 reviewBy 2027-03-31）+ gate-exemptions 1 + gauntlet crap 1。
+  // collector 口径：已过期 0 / 90 天内到期 0 / 其余 5 / 仅解除条件（无到期日）1。
+  assert.match(r.stdout, /合计 6 条待办/);
+  assert.match(r.stdout, /结构性（按设计不计入待办）30/);
 });
